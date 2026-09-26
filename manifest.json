@@ -1,0 +1,15 @@
+[
+  {
+    "name": "Spicy Lyrics AI Translator & Romaja",
+    "description": "Simultaneous Romanization (Romaja) and Context-Aware / Gemini AI Turkish Translations right below Spicy Lyrics lines, just like YouTube Music Better Lyrics!",
+    "preview": "preview.png",
+    "main": "spicy-tr.js",
+    "authors": [
+      {
+        "name": "korelili",
+        "url": "https://github.com/korelili"
+      }
+    ],
+    "tags": ["lyrics", "spicy-lyrics", "translation", "turkish", "romanization", "kpop", "ai"]
+  }
+]
