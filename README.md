@@ -15,12 +15,8 @@ Simultaneous **Romanization (Romaja)** and **Context-Aware / Gemini AI Turkish T
 
 ## 🚀 Installation
 
-### Via Spicetify Marketplace (Recommended)
-1. Open **Spicetify Marketplace** in Spotify.
-2. Go to **Extensions** and search for **`Spicy Lyrics AI Translator & Romaja`**.
-3. Click **Install** and reload Spotify!
+This is a companion extension that runs alongside **Spicy Lyrics**. Make sure you have Spicy Lyrics installed first!
 
-### Manual Installation
 1. Download `spicy-tr.js` from this repository.
 2. Paste it into your Spicetify Extensions folder (`%appdata%\spicetify\Extensions` on Windows).
 3. Run the following commands in PowerShell / Terminal:
