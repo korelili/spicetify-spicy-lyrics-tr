@@ -1,10 +1,10 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 11.0.0
-// DESCRIPTION: AI-First Multi-Model Engine (14.4K Daily Quota), Smart Question/Punctuation Restorer, Complete Turkish "Sen" Morphology & Pure Hybrid Romaja
+// VERSION: 12.0.0 (FINAL)
+// DESCRIPTION: Gemini 2.5 Poetic Whole-Song Localization, Strict Question/Punctuation Engine, 100% "Sen" Harmony & Pure Hybrid Romaja
 
-(function spicyLyricsAITranslatorV11() {
-  // Önceki tüm bozuk önbellekleri kesin olarak temizle
+(function spicyLyricsAITranslatorV12Final() {
+  // Önceki tüm sürüm önbelleklerini kesin olarak temizle
   [
     'spicy_tr_persistent_cache_v5',
     'spicy_tr_persistent_cache_v6',
@@ -12,10 +12,11 @@
     'spicy_tr_persistent_cache_v7_0',
     'spicy_tr_persistent_cache_v8_0',
     'spicy_tr_persistent_cache_v9_0',
-    'spicy_tr_persistent_cache_v10_0'
+    'spicy_tr_persistent_cache_v10_0',
+    'spicy_tr_persistent_cache_v11_0'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_persistent_cache_v11_0';
+  const STORAGE_CACHE_KEY = 'spicy_tr_persistent_cache_v12_final';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -228,46 +229,41 @@
     return cleanRomajaString(resolvedParts.filter(Boolean).join(' '));
   }
 
-  // Orijinal veya çevrilmiş satırın soru cümlesi olup olmadığını tespit eden akıllı dedektör
-  function isQuestionLine(tr, rawText) {
-    if (/[?？]$/.test(rawText.trim()) || /[?？]$/.test(tr.trim())) return true;
+  // V12 KESİN SORU KONTROLÜ: "いつも" (her zaman) veya "Çünkü..." gibi düz cümlelere ASLA "?" koymaz!
+  function fixQuestionPunctuation(tr, rawText) {
+    let cleanTr = tr.replace(/[.!?？]+$/, '').trim();
 
-    // Japonca soru kalıpları (örn: どこを気にしているの, どこに行くつもりなの, なぜ, どうして, 何を, ...か)
-    if (/[\u3040-\u30ff]/.test(rawText)) {
-      if (/(どこ|なに|何|だれ|誰|いつ|なぜ|どうして|どう|どれ|どっち)/.test(rawText)) return true;
-      if (/(るの|なの|かな|かい|ですか|ますか|のか)$/.test(rawText.trim())) return true;
-    }
-
-    // Korece soru kalıpları (örn: 언제까지 망설이니 너, 어떠니, 어디, 왜, 어떻게, ...니까, ...나요)
-    if (/[\uac00-\ud7a3]/.test(rawText)) {
-      if (/(어디|언제|왜|어떻게|누구|무슨|얼마나)/.test(rawText) && !/어디로 가든/.test(rawText)) return true;
-      if (/(이니|하니|오니|가니|보니|어떠니|어쩌니|을까|할까|볼까|나요|가요|래\b)/.test(rawText)) return true;
+    // Başında "Çünkü", "Ama", "Ve", "Sanki", "Böylece", "Her zaman", "Asla" olan düz cümleler soru olamaz (içinde "mi/mı/musun" yoksa)
+    const hasTurkishQuestionParticle = /\b(mi|mı|mu|mü|misin|mısın|musun|müsün|miyim|mıyım|muyum|müyüm|miyiz|mıyız|muyuz|müyüz)\b/i.test(cleanTr);
+    if (/^(çünkü|ama\b|fakat\b|sanki\b|her zaman\b|hep\b|asla\b|hiçbir\b|artık\b|bırak\b|şimdi\b)/i.test(cleanTr) && !hasTurkishQuestionParticle) {
+      return cleanTr;
     }
 
-    // İngilizce soru kalıpları
-    if (/^(where|what|why|how|who|when|are you|do you|don't you|can you|will you|won't you|should I|am I)\b/i.test(rawText.trim())) {
-      return true;
+    // Orijinal metinde açıkça "?" varsa
+    if (/[?？]$/.test(rawText.trim())) {
+      return cleanTr + '?';
     }
 
-    // Türkçe çevirideki soru ekleri ve soru kelimeleri
-    const cleanTr = tr.replace(/[.!,]+$/, '').trim();
-    if (/\b(mi|mı|mu|mü|misin|mısın|musun|müsün|miyim|mıyım|muyum|müyüm|miyiz|mıyız|muyuz|müyüz|midir|mıdır|mudur|müdür)$/i.test(cleanTr)) {
-      return true;
-    }
-    if (/^(ne|neyi|neye|neden|niye|niçin|nasıl|nerede|nereye|nereden|kim|kimi|kime|hangi|kaç|ne zaman|ne kadar)\b/i.test(cleanTr)) {
-      // "Ne olursa olsun" veya "Ne ... ne ..." bağlaçlarını hariç tut
-      if (!/^ne\s+olursa\s+olsun/i.test(cleanTr) && !/^ne\s+gidersek/i.test(cleanTr)) {
-        return true;
-      }
-    }
-    if (/\b(nasılsın|neredesin|gidiyorsun|endişeleniyorsun|bakıyorsun|bekliyorsun|istiyorsun|düşünüyorsun)\b/i.test(cleanTr) && /\b(ne|nereye|nasıl|neden|niye|ne kadar)\b/i.test(cleanTr)) {
-      return true;
+    // Türkçe cümlede açık soru eki varsa (örn: "var mı", "değil mi", "bilir misin")
+    if (hasTurkishQuestionParticle) {
+      return cleanTr + '?';
     }
 
-    return false;
+    // Türkçe cümlede gerçek soru kelimesi + 2. tekil şahıs soru çekimi varsa (örn: "Nereye gidiyorsun?", "Neyi kafana takıyorsun?", "Bugün nasılsın?", "Daha ne kadar tereddüt edeceksin?")
+    if (/\b(nasılsın|neredesin|kimsin|neyim|neredeyim)\b/i.test(cleanTr)) {
+      return cleanTr + '?';
+    }
+    if (/^(nereye|nerede|nereden|neden|niye|niçin|nasıl|kim|kimi|kime|daha ne kadar|ne zaman)\b/i.test(cleanTr) && !/\b(olursa olsun|gidersek gidelim)\b/i.test(cleanTr)) {
+      return cleanTr + '?';
+    }
+    if (/\b(ne|neyi|nereye|nasıl|neden|niye)\b.*\b(gidiyorsun|endişeleniyorsun|takıyorsun|bakıyorsun|bekliyorsun|istiyorsun|düşünüyorsun|yapıyorsun|arıyorsun|kaçıyorsun|edeceksin)\b/i.test(cleanTr)) {
+      return cleanTr + '?';
+    }
+
+    return cleanTr;
   }
 
-  // J-Pop, K-Pop ve Karma satırları yedek motora da kusursuz hazırlayan ön-işlemci
+  // Yedek motor için cümle bütünlüğü hazırlayıcı
   function prepareLineForFallback(rawText) {
     let text = rawText
       .replace(/\(Tip tap[^)]*\)/gi, '')
@@ -275,31 +271,32 @@
       .replace(/\(Whoo\)/gi, '')
       .replace(/\(Hey\)/gi, '')
       .replace(/\(Yeah\)/gi, '')
-      // J-Pop (Focus On Me & My Swagger) karma ve bağ-fiil kalıpları
       .replace(/どこを気にしているの/g, 'Where is your mind wandering right now?')
       .replace(/どこに行くつもりなの/g, 'Where do you think you are going?')
       .replace(/どうせ離れられない/g, 'You cannot stay away from me anyway')
       .replace(/求めて\s*求めて\s*baby/gi, 'Crave me, want me more, baby')
       .replace(/しびれるような鋭い視線あびると/g, 'When I feel your sharp, electrifying gaze on me')
-      .replace(/手招きされるように声に委ねるサイン/g, 'A sign to surrender myself to your beckoning voice')
-      .replace(/想いを浮かべ/g, 'Let your feelings surface')
+      .replace(/手招きされるように声に委ねるサイン/g, 'I surrender myself to your beckoning voice')
+      .replace(/想いを浮かべ/g, 'Let your deepest feelings surface')
       .replace(/素直になれば分かるさ/g, 'If you are honest with your heart, you will understand')
       .replace(/You and me\s*今だけ見て/gi, 'Just you and me, look only at this moment right now')
       .replace(/同じテンポ合わせて/g, 'Let us sync our rhythm to the same tempo')
       .replace(/鼓動の音\s*合わせるように/g, 'As if syncing the sound of our heartbeats')
-      .replace(/時間内に捕まえて/g, 'Catch me before time runs out')
+      .replace(/気持ち\s*重なり合う/g, 'Our feelings intertwine with each other')
+      .replace(/言葉はなくても\s*膨らむ/g, 'Growing deeper inside us even without words')
+      .replace(/限られた時間でつかんで/g, 'Hold onto me tight in this fleeting moment')
+      .replace(/時間内に捕まえて/g, 'Hold onto me tight before this moment passes')
       .replace(/全て\s*I don't care/gi, 'I do not care about anything else at all')
       .replace(/君は\s*It's okay/gi, 'With you, everything is alright')
       .replace(/暗くなる街灯で/g, 'Under the dimming streetlights')
       .replace(/照らす影が踊って/g, 'Our illuminated shadows are dancing')
       .replace(/まるで映画のよう/g, 'Just like a movie scene')
-      .replace(/気持ちが通じ合って/g, 'Our feelings connect with each other')
+      .replace(/気持ちが通じ合って/g, 'Our hearts understand each other')
       .replace(/月明かりに描いて/g, 'Painting our dreams in the moonlight')
-      .replace(/近づいていく理想/g, 'Getting closer to our ideal dream')
+      .replace(/近づいていく理想/g, 'Getting closer to the dream we wished for')
       .replace(/眩しい君が窓辺に映る/g, 'Your dazzling beauty reflects on the window')
       .replace(/甘い君の吐息が包む/g, 'Your sweet breath wraps all around me')
       .replace(/いつも君で溢れるから/g, 'Because my heart is always overflowing with you')
-      // K-Pop & diğer kalıplar
       .replace(/\bE'ryday\b/gi, 'every single day')
       .replace(/\bI got '?em\b/gi, 'I have everyone captivated')
       .replace(/내 욕심\s*Stays hungry\s*나 언제나 배고프잖아/gi, 'My ambition is never satisfied, I am always hungry for more')
@@ -322,24 +319,28 @@
     return text;
   }
 
-  // KUSURSUZ TÜRKÇE ŞARKI DİLİ & NOKTALAMA MOTORU ("benliğiniz", "zihninizde", "yapın", "-mak/-mek" ve eksik "?" hatalarını %100 bitirir)
-  function perfectTurkishLyric(tr, rawText) {
+  // V12 FİNAL TÜRKÇE DOĞALLAŞTIRICI: Tüm robotik/sözlük kalıplarını, "-niz" eklerini ve yanlış "?" işaretlerini temizler!
+  function finalizePoeticTurkish(tr, rawText) {
     if (!tr) return '';
     if (isPureRhythmOrVocal(rawText)) return '';
 
     let fixed = tr.trim();
 
-    // 1. Kırık kalıp, mastar ve anlamsız kelime düzeltmeleri
+    // 1. Robotik / sözlük çevirisi kalıplarını gerçek şarkı sözüne dönüştür
     fixed = fixed
-      .replace(/Göz kamaştırıcı benliğiniz pencereye yansıyor/gi, 'Göz kamaştıran güzelliğin pencereye yansıyor')
-      .replace(/Göz kamaştırıcı benliğin pencereye yansıyor/gi, 'Göz kamaştıran güzelliğin pencereye yansıyor')
-      .replace(/\bbenliğiniz\b/gi, 'halin')
-      .replace(/\bbenliğin\b/gi, 'halin')
-      .replace(/Duygularının zihninizde yüzeye çıkmasına izin ver/gi, 'Bırak içindeki duygular yüzeye çıksın')
-      .replace(/Duygularının zihninde yüzeye çıkmasına izin ver/gi, 'Bırak içindeki duygular yüzeye çıksın')
+      .replace(/Kendimi senin çağıran sesine teslim etme işareti/gi, 'Beni kendine çağıran o sesine teslim oluyorum')
+      .replace(/.*çağıran.*sesine.*teslim\s+(etme|olma)\s+işareti/gi, 'Beni kendine çağıran o sesine teslim oluyorum')
+      .replace(/Sınırlı bir süre içinde yakala/gi, 'Bu kısacık anda sıkıca tut beni')
+      .replace(/Sıra bir süre içinde yakala/gi, 'Bu kısacık anda sıkıca tut beni')
+      .replace(/Kısıtlı( bir)? sürede yakala/gi, 'Bu kısacık anda sıkıca tut beni')
+      .replace(/Kelimeler olmadan bile genişliyor/gi, 'Kelimeler olmasa bile içimde büyüyor')
+      .replace(/Kelimeler olmasa( da| bile) genişliyor/gi, 'Kelimeler olmasa bile içimde büyüyor')
+      .replace(/^Duygular örtüşüyor$/i, 'Hislerimiz birbiriyle buluşuyor')
+      .replace(/Duygularının( zihninizde| zihninde)? yüzeye çıkmasına izin ver/gi, 'Bırak içindeki bütün hisler dökülsün')
+      .replace(/Göz kamaştırıcı (benliğiniz|benliğin) pencereye yansıyor/gi, 'Göz kamaştıran güzelliğin pencereye yansıyor')
       .replace(/Ritimimizi aynı tempoya uydurmak/gi, 'Ritmimizi aynı tempoda buluşturalım')
       .replace(/Ritmimizi aynı tempoya uydurmak/gi, 'Ritmimizi aynı tempoda buluşturalım')
-      .replace(/Umurumda olmayan her şey/gi, 'Diğer hiçbir şey umurumda değil')
+      .replace(/Umurumda olmayan her şey/gi, 'Başka hiçbir şey umurumda değil')
       .replace(/Sen sorun değil/gi, 'Seninle her şey yolunda')
       .replace(/Ay ışığında çizim yap(ın)?/gi, 'Ay ışığında hayallerimizi çizelim')
       .replace(/Yaklaşan bir ideal/gi, 'Adım adım yaklaştığımız o hayal')
@@ -358,14 +359,13 @@
       .replace(/\bSizden\b/g, 'Senden').replace(/\bsizden\b/g, 'senden')
       .replace(/\bSiz\b/g, 'Sen').replace(/\bsiz\b/g, 'sen');
 
-    // 3. TAM MORFOLOJİK İYELİK MOTORU (-niz, -nız, -nuz, -nüz, -nizde, -nızda, -nizi, -nize, -menizi -> %100 Tekil "Sen")
+    // 3. Morfolojik İyelik Motoru (-niz, -nız, -nuz, -nüz, -nizde, -nizi, -nize -> Tekil "Sen")
     const rootExceptions = /^(deniz|denize|denizi|denizde|denizden|yıldız|yalnız|ansız|ikiz|sekiz|temiz|çeyiz|faiz|bariz|cılız|sakız|yaldız|kız|hız)$/i;
     fixed = fixed.split(/\s+/).map(word => {
       const cleanW = word.replace(/[.,!?'"()]/g, '');
       if (rootExceptions.test(cleanW)) return word;
 
       return word
-        // Çoğul nesne + "sizin" iyeliği: düşüncelerinizi -> düşüncelerini, gözlerinizde -> gözlerinde, elleriniz -> ellerin
         .replace(/(ler|lar)inizi\b/gi, '$1ini')
         .replace(/(ler|lar)inize\b/gi, '$1ine')
         .replace(/(ler|lar)inizde\b/gi, '$1inde')
@@ -378,7 +378,6 @@
         .replace(/(ler|lar)ınızdan\b/gi, '$1ından')
         .replace(/(ler|lar)ınızla\b/gi, '$1ınla')
         .replace(/(ler|lar)ınız\b/gi, '$1ın')
-        // İsim-fiil + "sizin": güvenmenizi -> güvenmeni, olmanız -> olman
         .replace(/([a-zçğıöşü]+m[ae])nizi\b/gi, '$1ni')
         .replace(/([a-zçğıöşü]+m[ae])nize\b/gi, '$1ne')
         .replace(/([a-zçğıöşü]+m[ae])nizde\b/gi, '$1nde')
@@ -387,7 +386,6 @@
         .replace(/([a-zçğıöşü]+m[ae])nıza\b/gi, '$1na')
         .replace(/([a-zçğıöşü]+m[ae])nızda\b/gi, '$1nda')
         .replace(/([a-zçğıöşü]+m[ae])nız\b/gi, '$1n')
-        // Tekil isim + bulunma/ayrılma/belirtme/yönelme/yalın "sizin" iyeliği (zihninizde -> zihninde, benliğiniz -> benliğin, sesinize -> sesine)
         .replace(/([a-zçğıöşü]{2,})inizde\b/gi, '$1inde')
         .replace(/([a-zçğıöşü]{2,})inizden\b/gi, '$1inden')
         .replace(/([a-zçğıöşü]{2,})inizi\b/gi, '$1ini')
@@ -412,7 +410,7 @@
         .replace(/([a-zçğıöşü]{2,})ünüz\b/gi, '$1ün');
     }).join(' ');
 
-    // 4. FİİL ÇEKİMLERİ VE EMİR KİPLERİ ("yapın" -> "yap", "edin" -> "et", "eşleştirin" -> "eşleştir")
+    // 4. Fiil Çekimleri ve Emir Kipleri ("yapın" -> "yap", "edin" -> "et")
     fixed = fixed
       .replace(/\b([a-zçğıöşü]+)\s+edin\b/gi, '$1 et')
       .replace(/\b([a-zçğıöşü]+)\s+ettirin\b/gi, '$1 ettir')
@@ -440,17 +438,13 @@
       .replace(/\byükseltin\b/gi, 'yükselt')
       .replace(/\başın\b/gi, 'aş');
 
-    // 5. CÜMLE SONUNDAKİ SÖZLÜK MASTARLARINI ("-mak / -mek") DOĞAL ÇEKİMLİ FİİLE DÖNÜŞTÜR (örn: "uydurmak" -> "uyduralım")
+    // 5. Cümle sonu mastarlarını ("-mak/-mek") doğal fiile çevir
     fixed = fixed
       .replace(/\b([a-zçğıöşü]{2,})mak$/i, '$1alım')
       .replace(/\b([a-zçğıöşü]{2,})mek$/i, '$1elim');
 
-    // 6. AKILLI NOKTALAMA VE SORU İŞARETİ ("?") YERLEŞTİRİCİ
-    fixed = fixed.replace(/\s+/g, ' ').trim();
-    if (isQuestionLine(fixed, rawText)) {
-      fixed = fixed.replace(/[.!,]+$/, '').trim();
-      if (!fixed.endsWith('?')) fixed += '?';
-    }
+    // 6. Kusursuz soru işareti kontrolü (düz cümlelerdeki yanlış "?" işaretini siler, gerçek sorulara "?" ekler)
+    fixed = fixQuestionPunctuation(fixed.replace(/\s+/g, ' ').trim(), rawText);
 
     if (fixed.length > 0) {
       fixed = fixed.charAt(0).toUpperCase() + fixed.slice(1);
@@ -474,7 +468,7 @@
       box.appendChild(romEl);
     }
 
-    const cleanedTr = perfectTurkishLyric(data.tr, rawText);
+    const cleanedTr = finalizePoeticTurkish(data.tr, rawText);
     if (cleanedTr && cleanedTr.toLowerCase() !== rawText.toLowerCase()) {
       const trEl = document.createElement('div');
       trEl.className = 'spicy-tr-turkish';
@@ -497,37 +491,39 @@
     });
   }
 
-  // 1. ÖNCELİKLİ ANA MOTOR: 4 Model Havuzlu (14.400 Günlük Kotalı Gemma-3-27B + Gemini Flash) Yapay Zeka Motoru!
-  async function translateFirstWithMultiModelAI(targetLines, fullSongContextArray) {
+  // 1. ANA MOTOR: Gemini 2.5 Flash Öncelikli Tam Şarkı Yerelleştirici
+  async function translateWithGeminiPoeticAI(targetLines, fullSongContextArray) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
 
     const indexedInput = targetLines.map((line, idx) => ({ i: idx, text: line }));
 
-    const prompt = `You are an elite Turkish poetic lyricist translating a song on Spotify.
+    const prompt = `You are a master Turkish poetic lyricist translating a song on Spotify.
 Song: "${songTitle}" by "${artist}".
-Full Song Context (read the whole context first so every line connects as one coherent story):
+Full Song Context (connect consecutive lines as one flowing story!):
 ${JSON.stringify(fullSongContextArray)}
 
-Translate each lyric line in the indexed list into natural, deeply meaningful, poetic Turkish ("tr").
+Translate each line in the indexed list into deeply natural, emotional, poetic Turkish ("tr").
 
-MANDATORY RULES:
-1. PUNCTUATION & QUESTION MARKS ("?"): Always place proper Turkish punctuation! If a line asks a question (e.g., Japanese "...の", "どこ...", Korean "...니", "...까", or Turkish "Ne...", "Nereye...", "Nasıl...", "-misin/-musun"), you MUST end the Turkish line with a question mark "?" (e.g., "Aklın nerede, neyi kafana takıyorsun?", "Nereye gitmeye niyetlisin?"). Use commas naturally between clauses.
-2. 100% SINGULAR INFORMAL ("SEN") TONE: NEVER use formal/plural "siz" forms ("-niz", "-nız", "-nizde", "-nizi", "benliğiniz", "zihninizde", "yapın", "edin")! Always address the lover/listener as "sen" (e.g., "Göz kamaştıran güzelliğin pencereye yansıyor", "Bırak içindeki duygular yüzeye çıksın", "Ay ışığında hayallerimizi çizelim").
-3. REAL SENTENCES (NO INFINITIVES OR BROKEN PHRASES):
-   - NEVER end a lyric line with a dictionary infinitive "-mak / -mek" (e.g., NEVER write "Ritimimizi aynı tempoya uydurmak" -> write "Ritmimizi aynı tempoda buluşturalım").
-   - Unify mixed Japanese/Korean + English lines into real Turkish sentences (e.g., "全て I don't care" -> "Diğer hiçbir şey umurumda değil", NOT "Umurumda olmayan her şey"; "君は It's okay" -> "Seninle her şey yolunda", NOT "Sen sorun değil").
+STRICT RULES:
+1. NO ROBOTIC OR LITERAL DICTIONARY TRANSLATIONS:
+   - Connect split lines across the stanza! For example, in "気持ち 重なり合う" -> "Hislerimiz birbiriyle buluşuyor", "言葉はなくても 膨らむ" -> "Kelimeler olmasa bile içimde büyüyor" (NEVER write "genişliyor"!), "限られた時間でつかんで" -> "Bu kısacık anda sıkıca tut beni" (NEVER write commercial phrases like "Sınırlı bir süre içinde yakala"!).
+   - In "手招きされるように声に委ねるサイン" -> "Beni kendine çağıran o sesine teslim oluyorum" (NEVER write clunky noun labels like "Kendimi senin çağıran sesine teslim etme işareti"!).
+2. PUNCTUATION ACCURACY:
+   - Put a question mark "?" ONLY on genuine questions (e.g., "Aklın nerede, neyi kafana takıyorsun?", "Nereye gidiyorsun?").
+   - NEVER put a question mark "?" on declarative sentences like "いつも君で溢れるから" ("Çünkü kalbim her an seninle dolup taşıyor")!
+3. 100% SINGULAR INFORMAL ("SEN") TONE: Address the listener/lover exclusively as "sen". NEVER use plural/formal "siz" ("-niz", "-nız", "-edin", "-yapın").
 4. For pure vocalizations ("Oh-whoa-whoa", "Tip tap tip tap tap"), set "tr" to "".
 
-Return ONLY a valid JSON array of objects with keys "i" (number) and "tr" (string), with no markdown formatting:
+Return ONLY a valid JSON array of objects with keys "i" (number) and "tr" (string):
 ${JSON.stringify(indexedInput)}`;
 
-    // 4 Ayrı Ücretsiz Model: gemma-3-27b-it (Günde 14.400 ücretsiz istek!) + gemini-2.5-flash-lite + gemini-2.5-flash + gemini-2.0-flash-lite
+    // En zeki modeller en başta!
     const models = [
-      { id: 'gemma-3-27b-it', supportsJsonMime: false },
-      { id: 'gemini-2.5-flash-lite', supportsJsonMime: true },
       { id: 'gemini-2.5-flash', supportsJsonMime: true },
-      { id: 'gemini-2.0-flash-lite', supportsJsonMime: true }
+      { id: 'gemini-2.5-flash-lite', supportsJsonMime: true },
+      { id: 'gemini-2.0-flash', supportsJsonMime: true },
+      { id: 'gemma-3-27b-it', supportsJsonMime: false }
     ];
 
     let lastErr = null;
@@ -553,8 +549,7 @@ ${JSON.stringify(indexedInput)}`;
         });
 
         if (res.status === 429 || res.status === 404 || res.status === 400) {
-          // Kota doluysa veya model kapalıysa 90 saniye boyunca bu modeli atla, hiç vakit kaybetmeden diğer modele geç!
-          modelCooldowns.set(m.id, Date.now() + 90000);
+          modelCooldowns.set(m.id, Date.now() + 60000);
           throw new Error(`HTTP ${res.status} on ${m.id}`);
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -563,7 +558,7 @@ ${JSON.stringify(indexedInput)}`;
         const parts = json?.candidates?.[0]?.content?.parts || [];
         const combinedText = parts.filter(p => !p.thought && p.text).map(p => p.text).join('\n') || parts.map(p => p.text || '').join('\n');
         const jsonMatch = combinedText.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) throw new Error('No JSON array in response');
+        if (!jsonMatch) throw new Error('No JSON array');
 
         const parsed = JSON.parse(jsonMatch[0]);
         if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty JSON array');
@@ -576,7 +571,7 @@ ${JSON.stringify(indexedInput)}`;
 
             if (found && typeof found.tr === 'string') {
               cache.set(rawText, {
-                tr: perfectTurkishLyric(found.tr, rawText),
+                tr: finalizePoeticTurkish(found.tr, rawText),
                 romaja
               });
             }
@@ -593,7 +588,7 @@ ${JSON.stringify(indexedInput)}`;
     throw lastErr;
   }
 
-  // 2. YEDEK BÜTÜNSEL MOTOR (Sadece AI Anahtarı Yoksa Veya İnternet/Tüm Modeller Kesilirse Devreye Girer)
+  // 2. YEDEK BÜTÜNSEL MOTOR
   async function translateWithCohesiveFallback(targetLines) {
     const validItems = [];
     targetLines.forEach((raw, idx) => {
@@ -624,7 +619,6 @@ ${JSON.stringify(indexedInput)}`;
       } catch (e) {}
     }
 
-    // İngilizce satır başındaki "-ing" mastarlarını ("Matching...") çekimli cümleye ("We match...") dönüştür ki Türkçede "-mak/-mek" çıkmasın!
     englishLines = englishLines.map(en =>
       en.replace(/^(Matching|Painting|Drawing|Floating|Getting|Falling|Running|Walking|Dancing)\b/i, 'We are $1')
     );
@@ -663,7 +657,7 @@ ${JSON.stringify(indexedInput)}`;
         const romaja = isNonLatin(item.raw) ? await buildHybridRomaja(item.raw, lang) : '';
 
         cache.set(item.raw, {
-          tr: perfectTurkishLyric(tr, item.raw),
+          tr: finalizePoeticTurkish(tr, item.raw),
           romaja
         });
       })
@@ -710,17 +704,16 @@ ${JSON.stringify(indexedInput)}`;
       const fullContextArray = Array.from(songFullLyricsContext);
       if (geminiApiKey && geminiApiKey.trim().length > 10) {
         try {
-          // V11.0: DOĞRUDAN 14.400 KOTALI AI MOTORUYLA ÇEVİR!
-          await translateFirstWithMultiModelAI(missingLines, fullContextArray);
+          await translateWithGeminiPoeticAI(missingLines, fullContextArray);
         } catch (aiErr) {
-          console.warn('Spicy TR V11: Tüm AI modelleri meşgul, Yedek Motor devreye girdi:', aiErr);
+          console.warn('Spicy TR V12: AI meşgul, Bütünsel Yedek Motor devreye girdi:', aiErr);
           await translateWithCohesiveFallback(missingLines);
         }
       } else {
         await translateWithCohesiveFallback(missingLines);
       }
     } catch (e) {
-      console.error('Spicy TR V11 Hata:', e);
+      console.error('Spicy TR V12 Hata:', e);
     } finally {
       isProcessing = false;
       if (pendingRescan) {
@@ -740,7 +733,7 @@ ${JSON.stringify(indexedInput)}`;
       btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''}`.trim();
       btn.textContent = geminiApiKey ? 'AI' : 'TR';
       btn.title = geminiApiKey
-        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: AI Anahtarını Yönet ve Önbelleği Sıfırla (V11.0 14.4K AI + Akıllı Noktalama Aktif)'
+        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: AI Anahtarını Yönet ve Önbelleği Sıfırla (V12.0 Final Aktif)'
         : 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Ücretsiz Gemini AI Anahtarı Gir';
     };
     updateBtnVisual();
@@ -758,9 +751,9 @@ ${JSON.stringify(indexedInput)}`;
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       const input = prompt(
-        '🌟 Spicy Lyrics AI Çeviri & Romaja V11.0 🌟\n\n' +
+        '🌟 Spicy Lyrics AI Çeviri & Romaja V12.0 (FINAL) 🌟\n\n' +
         '• Ücretsiz Gemini API Anahtarınızı aşağıya yapıştırın (aistudio.google.com/apikey).\n' +
-        '• Tamam\'a bastığınızda tüm eski önbellek temizlenir ve şarkı yeniden çevrilir:',
+        '• Tamam\'a bastığınızda tüm önbellek temizlenir ve şarkı yeniden çevrilir:',
         geminiApiKey
       );
       if (input !== null) {
