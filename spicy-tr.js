@@ -1,10 +1,13 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
-// AUTHOR: Aysenur
-// VERSION: 5.1.0
-// DESCRIPTION: Context-Aware & Gemini AI-Powered Lyrics Translation + Romanization for Spicy Lyrics
+// AUTHOR: korelili
+// VERSION: 6.0.0
+// DESCRIPTION: Flawless Word-Separated Romanization & Context-Aware / Gemini AI Turkish Translations for Spicy Lyrics
 
-(function spicyLyricsAITranslatorV5_1() {
-  const STORAGE_CACHE_KEY = 'spicy_tr_persistent_cache_v5';
+(function spicyLyricsAITranslatorV6() {
+  // Eski V5 bozuk önbelleğini otomatik temizle
+  localStorage.removeItem('spicy_tr_persistent_cache_v5');
+
+  const STORAGE_CACHE_KEY = 'spicy_tr_persistent_cache_v6';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -20,11 +23,10 @@
 
   function saveCacheToDisk() {
     try {
-      // Hafızanın şişmemesi için son 2500 satırı kalıcı tut
       const entries = Array.from(cache.entries()).slice(-2500);
       localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
     } catch (e) {
-      console.warn('Spicy TR Cache Yazma Uyarısı:', e);
+      console.warn('Spicy TR Cache Uyarısı:', e);
     }
   }
 
@@ -74,6 +76,7 @@
       color: rgba(255, 255, 255, 0.82) !important;
       -webkit-text-fill-color: rgba(255, 255, 255, 0.82) !important;
       opacity: 1 !important;
+      word-spacing: 2px !important;
     }
 
     #SpicyLyricsPage .spicy-tr-turkish {
@@ -130,22 +133,67 @@
     }, 100);
   }
 
-  function detectLang(text) {
-    if (/[\uac00-\ud7a3]/.test(text)) return 'ko';
-    if (/[\u3040-\u30ff]/.test(text)) return 'ja';
-    if (/[\u0e00-\u0e7f]/.test(text)) return 'th';
-    if (/[\u4e00-\u9faf]/.test(text)) return 'zh-CN';
-    return 'auto';
-  }
-
   function isNonLatin(text) {
     return /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf\u3400-\u4dbf\uac00-\ud7a3\u0e00-\u0e7f\u0400-\u04ff\u0600-\u06ff]/.test(text);
   }
 
+  // V6 KRİTİK DÜZELTME: Kelime kutularının (span/div) birbirine yapışmasını %100 önleyen akıllı okuyucu
   function getCleanText(lineEl) {
     const clone = lineEl.cloneNode(true);
     clone.querySelectorAll('.spicy-tr-box').forEach(el => el.remove());
+
+    // Eğer tek bir dış sarmalayıcı (wrapper) varsa onun içine in
+    let container = clone;
+    while (container.children.length === 1 && container.children[0].children.length > 0) {
+      container = container.children[0];
+    }
+
+    // Eğer satır kelime kelime elementlere bölünmüşse her kelime kutusunun arasına boşluk koy
+    if (container.children.length > 1) {
+      const words = [];
+      Array.from(container.childNodes).forEach(node => {
+        const txt = (node.textContent || '').trim();
+        if (txt) words.push(txt);
+      });
+      return words.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
     return clone.textContent.replace(/\s+/g, ' ').trim();
+  }
+
+  // Romaja metninde bitişik kalan İngilizce/Korece geçişlerini ve noktalamaları ayırır
+  function formatRomaja(rom, rawText) {
+    if (!rom) return '';
+    let cleaned = rom
+      // Küçük harften sonra gelen Büyük harfi ayır (örn: daLight -> da Light, hamkkelamyeonSay -> hamkkelamyeon Say)
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      // Virgül veya noktalamadan sonra yapışan kelimeleri ayır
+      .replace(/([,!?])([A-Za-z0-9])/g, '$1 $2')
+      // Sayı ile harf yapışmışsa ayır (örn: 7for7haeng -> 7 for 7 haeng)
+      .replace(/([0-9])([a-zA-Z])/g, '$1 $2')
+      .replace(/([a-zA-Z])([0-9])/g, '$1 $2')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned;
+  }
+
+  // Yedek motor (GTX) için şarkı deyimleri ve yanlış çeviri düzeltici
+  function polishTurkishTranslation(tr, rawText) {
+    if (!tr) return '';
+    let fixed = tr;
+    if (/like a python/i.test(rawText)) {
+      fixed = fixed.replace(/python/gi, 'piton yılanı');
+    }
+    if (/got a hold on me/i.test(rawText) && /tutması gerekiyor/i.test(fixed)) {
+      fixed = 'Ama beni bir piton gibi kıskacına aldı';
+    }
+    if (/^I should move on I know$/i.test(rawText.replace(/[,!.]/g, ''))) {
+      fixed = 'Önüme bakmam gerektiğini biliyorum';
+    }
+    if (/falling for the shooter/i.test(rawText) && /tetikçiye düşüyordum/i.test(fixed)) {
+      fixed = 'Göğsümden vuruldum, beni vurana aşık oluyordum';
+    }
+    return fixed;
   }
 
   function renderSubtitles(lineEl, data, rawText) {
@@ -158,14 +206,14 @@
     if (data.romaja && isNonLatin(rawText)) {
       const romEl = document.createElement('div');
       romEl.className = 'spicy-tr-romaja';
-      romEl.textContent = data.romaja;
+      romEl.textContent = formatRomaja(data.romaja, rawText);
       box.appendChild(romEl);
     }
 
     if (data.tr && data.tr.toLowerCase() !== rawText.toLowerCase()) {
       const trEl = document.createElement('div');
       trEl.className = 'spicy-tr-turkish';
-      trEl.textContent = data.tr;
+      trEl.textContent = polishTurkishTranslation(data.tr, rawText);
       box.appendChild(trEl);
     }
 
@@ -184,48 +232,66 @@
     });
   }
 
+  // 1. MOTOR: Gemini AI Kusursuz Şarkı Çeviri Motoru (Çift Model Yedekli)
   async function translateWithGeminiAI(allVisibleLines) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
 
-    const prompt = `You are an expert poetic music translator. Translate the following song lyrics (Song: "${songTitle}" by "${artist}") into natural, idiomatic, emotionally accurate Turkish. Understand slang, metaphors, and context across lines (e.g., "you got me" means "bana sahipsin/elinde ben varım", NOT "beni yakaladın"; "losing it" means "kontrolümü kaybediyorum/kafayı yiyorum").
-If a line is in a non-Latin script (Korean, Japanese, Thai, Chinese, Russian, etc.), also provide its smooth Latin pronunciation (romanization). If it is already in Latin script (English, Spanish, etc.), set "romaja" to "".
+    const prompt = `You are an expert poetic music translator. Translate the following song lyrics (Song: "${songTitle}" by "${artist}") into natural, idiomatic, emotionally accurate Turkish.
+CRITICAL RULES:
+1. Translate idioms and metaphors by their true meaning in Turkish (e.g. "got a hold on me like a python" = "beni bir piton gibi sardı/kıskacına aldı", "move on" = "önüme bakmak/unutmak", "falling for the shooter" = "beni vurana aşık oluyordum", "I'm an icon" = "bir ikon olduğumu"). Never leave animals/objects like "python" untranslated.
+2. If a line contains Korean, Japanese, Thai, Chinese, or Cyrillic characters, provide its clean, space-separated Latin pronunciation in "romaja" (put spaces between every word!). If the line is purely English/Latin, set "romaja" to "".
 Return ONLY a valid JSON array of objects in the exact same order as the input lines, with keys "tr" and "romaja".
 Input lines:
 ${JSON.stringify(allVisibleLines)}`;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey.trim()}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-      })
-    });
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    let lastError = null;
 
-    if (!res.ok) throw new Error('Gemini API limit or error');
-    const json = await res.json();
-    const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
-    const parsed = JSON.parse(rawOutput);
-
-    allVisibleLines.forEach((rawText, idx) => {
-      if (parsed[idx]) {
-        cache.set(rawText, {
-          tr: (parsed[idx].tr || '').trim(),
-          romaja: (parsed[idx].romaja || '').trim()
+    for (const model of models) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey.trim()}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+          })
         });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        let rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+        rawOutput = rawOutput.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        const parsed = JSON.parse(rawOutput);
+
+        if (!Array.isArray(parsed)) throw new Error('Invalid JSON array');
+
+        allVisibleLines.forEach((rawText, idx) => {
+          if (parsed[idx]) {
+            cache.set(rawText, {
+              tr: polishTurkishTranslation((parsed[idx].tr || '').trim(), rawText),
+              romaja: formatRomaja((parsed[idx].romaja || '').trim(), rawText)
+            });
+          }
+        });
+        saveCacheToDisk();
+        updateDOMWithCache();
+        return;
+      } catch (err) {
+        lastError = err;
       }
-    });
-    saveCacheToDisk();
-    updateDOMWithCache();
+    }
+    throw lastError;
   }
 
-  async function translateWithContextGTX(allVisibleLines) {
-    const sourceLang = detectLang(allVisibleLines.join(' '));
+  // 2. MOTOR: K-Pop Karma Dil Destekli (sl=auto) Bağlamsal Neural Motor
+  async function translateWithContextGTX(allVisibleLines, shouldSaveToDisk = true) {
+    // K-Pop şarkılarında hem İngilizce hem Korece satırlar olduğu için sl=auto kullanıyoruz
     const joinedBlock = allVisibleLines.join('.\n');
 
-    const contextUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joinedBlock)}`;
+    const contextUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joinedBlock)}`;
     const contextRes = await fetch(contextUrl);
     const contextJson = await contextRes.json();
 
@@ -240,8 +306,9 @@ ${JSON.stringify(allVisibleLines)}`;
         let trLine = splitLines[idx] || '';
         let romaja = '';
 
+        // Korece/Japonca satırların Romaja okunuşunu kelime boşluklarını koruyarak al
         if (isNonLatin(rawText) || !trLine) {
-          const singleUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(rawText)}`;
+          const singleUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(rawText)}`;
           const singleRes = await fetch(singleUrl);
           const singleJson = await singleRes.json();
 
@@ -249,16 +316,19 @@ ${JSON.stringify(allVisibleLines)}`;
             let fallbackTr = '';
             singleJson[0].forEach(item => {
               if (item[0]) fallbackTr += item[0];
-              if (item[3]) romaja = item[3];
+              if (item[3]) romaja += (romaja ? ' ' : '') + item[3];
             });
             if (!trLine) trLine = fallbackTr.trim();
           }
         }
 
-        cache.set(rawText, { tr: trLine, romaja: romaja.trim() });
+        cache.set(rawText, {
+          tr: polishTurkishTranslation(trLine, rawText),
+          romaja: formatRomaja(romaja, rawText)
+        });
       })
     );
-    saveCacheToDisk();
+    if (shouldSaveToDisk) saveCacheToDisk();
     updateDOMWithCache();
   }
 
@@ -273,12 +343,15 @@ ${JSON.stringify(allVisibleLines)}`;
           await translateWithGeminiAI(allVisibleLines);
           return;
         } catch (aiErr) {
-          console.warn('Spicy TR: AI sınırı/hatası, GTX yedek motoruna geçiliyor...', aiErr);
+          console.warn('Spicy TR: AI anlık yoğunlukta, geçici olarak GTX kullanılıyor...', aiErr);
+          // AI modundayken geçici hata olursa diske kaydetme ki bir sonraki açılışta AI çevirsin
+          await translateWithContextGTX(allVisibleLines, false);
+          return;
         }
       }
-      await translateWithContextGTX(allVisibleLines);
+      await translateWithContextGTX(allVisibleLines, true);
     } catch (e) {
-      console.error('Spicy TR V5.1 Hata:', e);
+      console.error('Spicy TR V6 Hata:', e);
     } finally {
       missingLines.forEach(t => inFlight.delete(t));
     }
@@ -294,7 +367,7 @@ ${JSON.stringify(allVisibleLines)}`;
       btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''}`.trim();
       btn.textContent = geminiApiKey ? 'AI' : 'TR';
       btn.title = geminiApiKey
-        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Gemini AI Anahtarını Yönet (Kalıcı Hafıza Aktif)'
+        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Gemini AI Anahtarını Yönet ve Önbelleği Sıfırla (V6 Aktif)'
         : 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Ücretsiz Gemini AI Anahtarı Gir';
     };
     updateBtnVisual();
@@ -312,10 +385,9 @@ ${JSON.stringify(allVisibleLines)}`;
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       const input = prompt(
-        '🌟 Spicy Lyrics AI Çeviri & Romaja Ayarları 🌟\n\n' +
+        '🌟 Spicy Lyrics AI Çeviri & Romaja V6.0 🌟\n\n' +
         '• Ücretsiz Gemini API Anahtarınızı aşağıya yapıştırın (aistudio.google.com/apikey).\n' +
-        '• Çevrilen şarkılar bilgisayarınıza kalıcı olarak kaydedilir, kotanız harcanmaz!\n' +
-        '• Standart (GTX) moda dönmek için kutuyu boş bırakıp Tamam\'a basın:',
+        '• Tamam\'a bastığınızda eski çeviri önbelleği temizlenir ve şarkı yeniden çevrilir:',
         geminiApiKey
       );
       if (input !== null) {
@@ -357,10 +429,9 @@ ${JSON.stringify(allVisibleLines)}`;
 
     if (hasMissing && allVisibleTexts.length > 0) {
       clearTimeout(batchTimer);
-      // Kaydırma esnasında kotayı korumak için 350ms akıllı bekleme
       batchTimer = setTimeout(() => {
         processStanzaTranslation(allVisibleTexts);
-      }, 350);
+      }, 300);
     }
   }
 
