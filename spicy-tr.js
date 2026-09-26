@@ -1,10 +1,10 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 17.0.0 (BETTER-LYRICS EDITION)
-// DESCRIPTION: LRClib Whole-Song Context + Dual Cloud AI (Gemini/Gemma + OpenAI Fallback) + Pure Hybrid Romaja
+// VERSION: 18.0.0
+// DESCRIPTION: Instant Non-Blocking Hybrid Romaja + Two-Step Mixed-Language Translator & Gemini AI Refiner for Spicy Lyrics
 
-(function spicyLyricsBetterTranslator() {
-  // Eski tüm bozuk önbellekleri temizle
+(function spicyLyricsTranslatorV18() {
+  // Eski önbellekleri temizle
   [
     'spicy_tr_persistent_cache_v5',
     'spicy_tr_persistent_cache_v6',
@@ -20,10 +20,11 @@
     'spicy_tr_persistent_cache_v15_universal',
     'spicy_tr_persistent_cache_v15_master',
     'spicy_tr_persistent_cache_v16_uncensored',
-    'spicy_tr_clean_v5_cache'
+    'spicy_tr_clean_v5_cache',
+    'spicy_tr_better_lyrics_v17'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_better_lyrics_v17';
+  const STORAGE_CACHE_KEY = 'spicy_tr_instant_v18';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -32,23 +33,20 @@
   }
 
   const cache = new Map(Object.entries(savedCache));
+  const inFlightFast = new Set();
+  const inFlightAi = new Set();
   const deadModels = new Map();
-  let currentSongKey = '';
-  let lrclibFullLyrics = '';
-  let lrclibFetchedForSong = '';
 
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
-  let isProcessing = false;
-  let pendingFollowUp = false;
-  let scanTimer = null;
-  let lastUsedEngine = 'Hazır';
+  let scanScheduled = false;
+  let aiTimer = null;
 
   function saveCache() {
     try {
       const entries = Array.from(cache.entries())
-        .filter(([, val]) => val && val.tr && !val.temp)
-        .slice(-4000);
+        .filter(([, val]) => val && val.tr)
+        .slice(-3500);
       localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
     } catch (e) {}
   }
@@ -210,7 +208,21 @@
     return clone.textContent.replace(/\s+/g, ' ').trim();
   }
 
-  // ROMAJA MOTORU (DOKUNULMADI - KUSURSUZ ÇALIŞIR)
+  // Zaman aşımı (Timeout) korumalı Fetch: Hiçbir ağ isteğinin kodu kilitlemesine izin vermez!
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  }
+
+  // HİBRİT ROMAJA MOTORU
   async function buildHybridRomaja(rawText) {
     if (!isNonLatin(rawText)) return '';
     const lang = detectLang(rawText);
@@ -222,7 +234,7 @@
         if (/[\u0400-\u04ff]/.test(part)) return transliterateCyrillic(part.trim());
         try {
           const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${lang}&tl=tr&dt=rm&q=${encodeURIComponent(part.trim())}`;
-          const res = await fetch(url);
+          const res = await fetchWithTimeout(url, {}, 3500);
           const json = await res.json();
           let rom = '';
           if (Array.isArray(json[0])) {
@@ -245,39 +257,34 @@
       .trim();
   }
 
-  // BETTER LYRICS GİBİ LRCLIB ÜZERİNDEN TAM ŞARKI SÖZÜ BAĞLAMI ÇEKİCİ
-  async function fetchLRClibContext(songTitle, artist) {
-    const key = `${artist} - ${songTitle}`;
-    if (lrclibFetchedForSong === key) return lrclibFullLyrics;
-    lrclibFetchedForSong = key;
-    lrclibFullLyrics = '';
-
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1800);
-      const url = `https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(songTitle)}`;
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.plainLyrics) {
-          lrclibFullLyrics = data.plainLyrics.slice(0, 2500);
-        }
-      }
-    } catch (e) {}
-    return lrclibFullLyrics;
+  // EVRENSEL ARGO & TÜRKÇE "SEN" UYUMU DÜZELTİCİ
+  function prepareTextForTranslation(rawText) {
+    return rawText
+      .replace(/우리 사인/g, '우리 사이는')
+      .replace(/\bImma\b/gi, 'I am going to')
+      .replace(/\bI'mma\b/gi, 'I am going to')
+      .replace(/\btryna\b/gi, 'trying to')
+      .replace(/\bgonna\b/gi, 'going to')
+      .replace(/\bwanna\b/gi, 'want to')
+      .replace(/\bgotta\b/gi, 'got to')
+      .replace(/\berrday\b/gi, 'every day')
+      .replace(/\be'ryday\b/gi, 'every day')
+      .replace(/\bma\s+(darling|baby|babe|love|girl|boy|heart|life|mind)\b/gi, 'my $1')
+      .replace(/,\s*boo\b/gi, ', my darling')
+      .replace(/\bAM\s*PM\b/g, 'Day and night');
   }
 
-  // EVRENSEL TÜRKÇE DİLBİLGİSİ VE "SEN" UYUMU KORUYUCU (Hiçbir kelimeyi bozmaz, "siz" -> "sen" yapar)
-  function polishTurkishGrammar(tr, rawText) {
+  function polishTurkish(tr, rawText) {
     if (!tr) return '';
     let fixed = tr.trim();
     if (fixed.includes('||')) fixed = fixed.split('||').pop().trim();
 
-    // Satır başındaki [0] gibi numaraları ve satır sonu nokta/soru işaretlerini temizle
     fixed = fixed.replace(/^\s*(?:\[\d+\]|\d+[.:)])\s*/, '').replace(/[?？.]+$/g, '').trim();
 
-    // Zamirleri samimi tekil "Sen" diline çevir
+    if (/\bfucked\b/i.test(rawText) && /\bberbat\b/i.test(fixed)) {
+      fixed = fixed.replace(/\bberbat\b/gi, 'boktan');
+    }
+
     fixed = fixed
       .replace(/\bSizin\b/g, 'Senin').replace(/\bsizin\b/g, 'senin')
       .replace(/\bSize\b/g, 'Sana').replace(/\bsize\b/g, 'sana')
@@ -286,7 +293,6 @@
       .replace(/\bSizden\b/g, 'Senden').replace(/\bsizden\b/g, 'senden')
       .replace(/\bSiz\b/g, 'Sen').replace(/\bsiz\b/g, 'sen');
 
-    // Evrensel "-niz/-nız/-nuz/-nüz" -> "-n" dönüşümü ("hissettiğinizde gözleriniz" -> "hissettiğinde gözlerin")
     const rootExceptions = /^(deniz|yalnız|henüz|boynuz|geniz|beniz)/i;
     fixed = fixed.split(/\s+/).map(word => {
       const cleanW = word.replace(/[.,!?'"()]/g, '');
@@ -296,10 +302,7 @@
         .replace(/n[iıuü]z(e|a|i|ı|u|ü|de|da|den|dan|le|la|in|ın|un|ün)?\b/gi, 'n$1');
     }).join(' ');
 
-    // Özne-yüklem uyumlu emir düzeltmesi
-    if (/\b(herkes|hepsi|kimse)\b/i.test(fixed)) {
-      fixed = fixed.replace(/\bherkes\s+(.*?\s+)?hisset(sin|in)?$/i, 'herkes $1hissetsin');
-    } else {
+    if (!/\b(herkes|hepsi|kimse)\b/i.test(fixed)) {
       fixed = fixed
         .replace(/([a-zçğıöşü]+m[ae])y[iı]n\b/gi, '$1')
         .replace(/([a-zçğıöşü]{2,}[aeıioöuü])y[iıuü]n\b/gi, '$1')
@@ -318,11 +321,18 @@
   }
 
   function renderSubtitles(lineEl, data, rawText) {
+    if (!data || (!data.tr && !data.romaja)) return;
+
+    const cleanTr = polishTurkish(data.tr, rawText);
+    const signature = `${data.romaja || ''}|${cleanTr}`;
+
     let box = lineEl.querySelector('.spicy-tr-box');
+    if (box && box.dataset.sig === signature) return;
     if (box) box.remove();
 
     box = document.createElement('div');
     box.className = 'spicy-tr-box';
+    box.dataset.sig = signature;
 
     if (data.romaja && isNonLatin(rawText)) {
       const romEl = document.createElement('div');
@@ -331,19 +341,17 @@
       box.appendChild(romEl);
     }
 
-    const cleanedTr = polishTurkishGrammar(data.tr, rawText);
-    if (cleanedTr && cleanedTr.toLowerCase() !== rawText.toLowerCase()) {
+    if (cleanTr && cleanTr.toLowerCase() !== rawText.toLowerCase()) {
       const trEl = document.createElement('div');
       trEl.className = 'spicy-tr-turkish';
-      trEl.textContent = cleanedTr;
+      trEl.textContent = cleanTr;
       box.appendChild(trEl);
     }
 
-    if (box.children.length === 0) {
-      box.style.setProperty('display', 'none', 'important');
+    if (box.children.length > 0) {
+      lineEl.appendChild(box);
+      triggerRecalc();
     }
-    lineEl.appendChild(box);
-    triggerRecalc();
   }
 
   function updateDOMWithCache() {
@@ -353,289 +361,184 @@
         renderSubtitles(el, cache.get(text), text);
       }
     });
-    const btn = document.getElementById('spicy-tr-toggle-btn');
-    if (btn) {
-      btn.title = `Aktif Çeviri Motoru: ${lastUsedEngine} | Sol Tık: Aç/Kapat | Sağ Tık: API Anahtarı & Önbellek Sıfırla`;
-    }
   }
 
-  // ESNEK AI ÇIKTI AYRIŞTIRICI ("[0] ...", "0. ...", JSON dizisi hepsini okur, asla çökmez!)
-  function parseAiOutput(rawOutput) {
-    const resultMap = new Map();
-    if (!rawOutput) return resultMap;
-
-    const cleaned = rawOutput.replace(/^```[a-z]*\s*/im, '').replace(/```\s*$/im, '').trim();
-
-    const lineRegex = /^\s*(?:\*\*)?(?:\[(\d+)\]|(\d+)[.:)])(?:\*\*)?\s*[-–—:]?\s*(.+)$/gm;
-    let match;
-    while ((match = lineRegex.exec(cleaned)) !== null) {
-      const idx = parseInt(match[1] !== undefined ? match[1] : match[2], 10);
-      let text = match[3].trim();
-      if (text.includes('||')) text = text.split('||').pop().trim();
-      text = text.replace(/^["']|["']$/g, '').trim();
-      if (!isNaN(idx) && text) {
-        resultMap.set(idx, text);
-      }
-    }
-
-    if (resultMap.size > 0) return resultMap;
+  // 1. ANLIK MOTOR (0.2 Saniyede Romaja + İki Aşamalı Karma Dil Çevirisini Ekrana Basar — ASLA Bekletmez!)
+  async function translateInstantFastBatch(linesToProcess) {
+    linesToProcess.forEach(l => inFlightFast.add(l));
 
     try {
-      const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(parsed)) {
-          parsed.forEach((item, i) => {
-            const tr = typeof item === 'string' ? item : (item?.tr || '');
-            const idx = typeof item?.i === 'number' ? item.i : i;
-            if (tr) resultMap.set(idx, tr);
-          });
-        }
-      }
-    } catch (e) {}
+      const preparedList = linesToProcess.map(raw => prepareTextForTranslation(raw));
 
-    return resultMap;
-  }
-
-  function buildMasterPrompt(linesToTranslate, allDomLines, songTitle, artist, lrclibContext) {
-    const numberedLines = linesToTranslate.map((l, i) => `[${i}] ${l}`).join('\n');
-    const fullContext = lrclibContext || allDomLines.join('\n');
-
-    return `You are Turkey's #1 poetic music translator (like the best Turkish lyric translation channels on YouTube and Better Lyrics).
-Song: "${songTitle}" by "${artist}"
-
-FULL SONG CONTEXT (Read the whole song first so split sentences across consecutive lines connect seamlessly):
-${fullContext}
-
-Translate EVERY numbered lyric line below into 100% natural, emotional, idiomatic, uncensored Turkish song lyrics.
-
-CRITICAL RULES:
-1. MEANING & CONTEXT OVER LITERAL WORDS:
-   - Mentally translate each line (including mixed English/Korean/Japanese/Thai/Chinese/Spanish) into complete idiomatic English in the context of the whole song first, then write natural Turkish.
-   - Connect split sentences across lines! For example, in Korean "우아하게 날 부른 손짓에 날 맡길 때 우리 사인" followed by "한없이 깊어져 깊어져", "우리 사인" is a contraction of "우리 사이는" (aramız / aramızdaki bağ), NOT "işaretimiz/tabelamız"! Translate it naturally as "Beni zarifçe çağıran o el hareketine kendimi bıraktığımda, aramızdaki bağ".
-   - Understand slang & idioms: "옆구리 찔러서 절 받기" = "zorla ilgi beklemek", "바람을 피우다" = "aldatmak", "ma darling" = "sevgilim", "Imma" = "yapacağım", "9 to 6, boo" = "sabah 9 akşam 6 çalışan bir kız, bebeğim", "Feel like a fool" = "Kendimi aptal gibi hissediyorum".
-2. 100% SINGULAR INFORMAL ("SEN") TONE: Always address the lover/listener as "sen" (e.g. "hissettiğimde gözlerin", "bana bak, etrafına aldırma"). NEVER use plural/formal "siz" ("hissettiğinizde", "gözleriniz", "bakın")!
-3. UNCENSORED & NATURAL: Do not censor profanity or +18 themes. Do not leave untranslated foreign words. Do not put periods (".") or question marks ("?") at the end of lines.
-
-Return ONLY the numbered Turkish translations in this exact format (one line per index):
-[0] Turkish translation
-[1] Turkish translation
-
-Lines to translate:
-${numberedLines}`;
-  }
-
-  // 1. KATMAN: Kullanıcının Gemini/Gemma API Anahtarı (Günlük 14.400 Kotalı Gemma-3-27B + Gemini 2.5 Havuzu)
-  async function tryGeminiModels(prompt, linesToTranslate) {
-    if (!geminiApiKey || geminiApiKey.trim().length <= 10) {
-      throw new Error('No Gemini API key');
-    }
-
-    // gemma-3-27b-it günde 14.400 ücretsiz isteğe izin verir (gemini-2.5-flash'ın 20'lik kotası dolsa bile kesintisiz çalışır!)
-    const models = [
-      'gemma-3-27b-it',
-      'gemini-2.5-flash-lite',
-      'gemini-2.5-flash',
-      'gemma-3-12b-it',
-      'gemini-1.5-flash'
-    ];
-
-    let lastErr = null;
-    for (const model of models) {
-      if ((deadModels.get(model) || 0) > Date.now()) continue;
-
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey.trim()}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3 }
-          })
-        });
-
-        if (res.status === 429 || res.status === 404 || res.status === 400) {
-          deadModels.set(model, Date.now() + 120000);
-          throw new Error(`HTTP ${res.status} on ${model}`);
-        }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        const json = await res.json();
-        const parts = json?.candidates?.[0]?.content?.parts || [];
-        const rawOutput = parts.filter(p => !p.thought && p.text).map(p => p.text).join('\n') || parts.map(p => p.text || '').join('\n');
-
-        const parsedMap = parseAiOutput(rawOutput);
-        if (parsedMap.size < Math.min(2, linesToTranslate.length)) {
-          throw new Error('Incomplete AI output');
-        }
-
-        lastUsedEngine = `Gemini AI (${model})`;
-        return parsedMap;
-      } catch (err) {
-        lastErr = err;
-      }
-    }
-    throw lastErr;
-  }
-
-  // 2. KATMAN: Anahtarsız & Kotasız Ücretsiz Bulut Yapay Zeka Yedeği (Gemini kotan dolsa bile ASLA aptal Google Translate'e düşmez!)
-  async function tryFreeCloudAI(prompt, linesToTranslate) {
-    const res = await fetch('https://text.pollinations.ai/openai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'openai',
-        messages: [
-          { role: 'system', content: 'You are a professional Turkish poetic lyric translator. Output only [index] Turkish translation lines.' },
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.3
-      })
-    });
-
-    if (!res.ok) throw new Error(`Cloud AI HTTP ${res.status}`);
-    const json = await res.json();
-    const rawOutput = json?.choices?.[0]?.message?.content || '';
-    const parsedMap = parseAiOutput(rawOutput);
-
-    if (parsedMap.size === 0) throw new Error('Empty Cloud AI output');
-    lastUsedEngine = 'Cloud AI (GPT-4o-mini)';
-    return parsedMap;
-  }
-
-  // 3. KATMAN: İki Aşamalı (Kaynak -> EN -> TR) Acil Durum Yedeği (Sadece tüm yapay zekalar çevrimdışıysa)
-  async function translateEmergencyFallback(linesToTranslate, isTemp = false) {
-    lastUsedEngine = 'GTX Fallback';
-    const cleanedLines = linesToTranslate.map(raw =>
-      raw
-        .replace(/우리 사인/g, '우리 사이는')
-        .replace(/\bImma\b/gi, 'I am going to')
-        .replace(/\btryna\b/gi, 'trying to')
-        .replace(/\berrday\b/gi, 'every day')
-        .replace(/\bma\s+(darling|baby|babe|love|girl|boy)\b/gi, 'my $1')
-    );
-
-    let trLines = [];
-    try {
-      const joined = cleanedLines.map(l => l.replace(/[.!?]+$/, '') + '.').join('\n');
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joined)}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      const full = (json.sentences || []).map(s => s.trans || '').join('');
-      const split = full.split('\n').map(s => s.replace(/\.$/, '').trim()).filter(Boolean);
-      if (split.length === linesToTranslate.length) trLines = split;
-    } catch (e) {}
-
-    await Promise.all(
-      linesToTranslate.map(async (rawText, idx) => {
-        let tr = trLines[idx] || '';
-        if (!tr) {
+      // Eğer satırda hem Asya harfleri hem İngilizce kelimeler karışıksa ("현혹된 듯 every night" gibi),
+      // önce İngilizceye çevirip cümleyi birleştir, sonra tüm kıtayı birlikte Türkçeye çevir!
+      const unifiedEnglishOrSource = await Promise.all(
+        preparedList.map(async (prep, idx) => {
+          const raw = linesToProcess[idx];
+          const hasMixedLatinAndAsian = isNonLatin(raw) && /[A-Za-z]{2,}/.test(raw);
+          if (!hasMixedLatinAndAsian) return prep;
           try {
-            const sUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&q=${encodeURIComponent(cleanedLines[idx])}`;
-            const sRes = await fetch(sUrl);
-            const sJson = await sRes.json();
-            if (Array.isArray(sJson[0])) {
-              sJson[0].forEach(seg => { if (seg[0]) tr += seg[0]; });
+            const lang = detectLang(raw);
+            const enUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${lang}&tl=en&dt=t&q=${encodeURIComponent(prep)}`;
+            const res = await fetchWithTimeout(enUrl, {}, 3000);
+            const json = await res.json();
+            let en = '';
+            if (Array.isArray(json[0])) {
+              json[0].forEach(seg => { if (seg[0]) en += seg[0]; });
             }
-          } catch (e) {}
+            return en.trim() || prep;
+          } catch (e) {
+            return prep;
+          }
+        })
+      );
+
+      // Kıta bütünlüğünü korumak için önce toplu çeviriyi dene
+      let batchTr = [];
+      try {
+        const joined = unifiedEnglishOrSource.map(l => l.replace(/[.!?]+$/, '') + '.').join('\n');
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joined)}`;
+        const res = await fetchWithTimeout(url, {}, 3500);
+        const json = await res.json();
+        const full = (json.sentences || []).map(s => s.trans || '').join('');
+        const split = full.split('\n').map(s => s.replace(/\.$/, '').trim()).filter(Boolean);
+        if (split.length === linesToProcess.length) {
+          batchTr = split;
         }
-        const romaja = isNonLatin(rawText) ? await buildHybridRomaja(rawText) : '';
-        const polished = polishTurkishGrammar(tr, rawText);
-        if (polished) {
-          cache.set(rawText, { tr: polished, romaja, temp: isTemp });
-        }
-      })
-    );
-    if (!isTemp) saveCache();
-    updateDOMWithCache();
+      } catch (e) {}
+
+      // Her satırın Romaja ve Türkçe çevirisini garanti altına al
+      await Promise.all(
+        linesToProcess.map(async (rawText, idx) => {
+          let tr = batchTr[idx] || '';
+          const lang = detectLang(rawText);
+
+          if (!tr || /bu çok önemli/i.test(tr)) {
+            try {
+              const sUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${lang}&tl=tr&dt=t&q=${encodeURIComponent(unifiedEnglishOrSource[idx])}`;
+              const sRes = await fetchWithTimeout(sUrl, {}, 3500);
+              const sJson = await sRes.json();
+              tr = '';
+              if (Array.isArray(sJson[0])) {
+                sJson[0].forEach(seg => { if (seg[0]) tr += seg[0]; });
+              }
+            } catch (e) {}
+          }
+
+          const romaja = isNonLatin(rawText) ? await buildHybridRomaja(rawText) : '';
+          const finalTr = polishTurkish(tr, rawText);
+
+          if (finalTr || romaja) {
+            cache.set(rawText, {
+              tr: finalTr,
+              romaja,
+              aiUpgraded: false
+            });
+          }
+        })
+      );
+
+      saveCache();
+      updateDOMWithCache();
+    } finally {
+      linesToProcess.forEach(l => inFlightFast.delete(l));
+    }
   }
 
-  async function processWholeSongTranslation() {
-    if (isProcessing) {
-      pendingFollowUp = true;
-      return;
-    }
+  // 2. ARKA PLAN GEMINI AI YÜKSELTİCİ (Ekranı hiç kilitlemeden arka planda çalışır, başarılı olursa satırları şiirsel AI çevirisiyle günceller)
+  async function upgradeVisibleLinesWithGeminiAI(allVisibleLines) {
+    if (!geminiApiKey || geminiApiKey.trim().length <= 10) return;
 
-    const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
-    const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
-    const songKey = `${artist} - ${songTitle}`;
+    const linesNeedingAi = allVisibleLines.filter(
+      t => (!cache.has(t) || !cache.get(t).aiUpgraded) && !inFlightAi.has(t)
+    );
+    if (linesNeedingAi.length === 0) return;
 
-    const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
-    const allDomLines = [];
-    const missingLines = [];
+    const batch = linesToUpgrade = linesNeedingAi.slice(0, 25);
+    batch.forEach(t => inFlightAi.add(t));
 
-    lineEls.forEach(lineEl => {
-      const text = getCleanText(lineEl);
-      if (!text || text === '•••') return;
-
-      if (!allDomLines.includes(text)) allDomLines.push(text);
-
-      if (cache.has(text)) {
-        if (!lineEl.querySelector('.spicy-tr-box')) {
-          renderSubtitles(lineEl, cache.get(text), text);
-        }
-      } else if (!missingLines.includes(text)) {
-        missingLines.push(text);
-      }
-    });
-
-    if (missingLines.length === 0) return;
-
-    isProcessing = true;
     try {
-      // Better Lyrics gibi önce LRClib üzerinden tam şarkı sözünü çek (bağlamın hiç kopmaması için)
-      const lrclibContext = await fetchLRClibContext(songTitle, artist);
-      // Şarkıyı tek seferde (35 satırlık blok halinde) yapay zekaya gönder (kota dostu!)
-      const batch = missingLines.slice(0, 35);
-      const prompt = buildMasterPrompt(batch, allDomLines, songTitle, artist, lrclibContext);
+      const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
+      const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
+      const numberedInput = batch.map((l, i) => `[${i}] ${l}`).join('\n');
 
-      let aiMap = null;
-      try {
-        aiMap = await tryGeminiModels(prompt, batch);
-      } catch (geminiErr) {
-        console.warn('Spicy TR: Gemini API kotası dolu veya meşgul, Ücretsiz Bulut AI devreye giriyor...', geminiErr);
+      const prompt = `You are an expert poetic Turkish music translator.
+Song: "${songTitle}" by "${artist}"
+Full visible lyrics context:
+${allVisibleLines.join('\n')}
+
+Translate each numbered line below into natural, idiomatic, emotionally accurate, uncensored Turkish song lyrics.
+Rules:
+1. Translate by true meaning and context across lines, never word-by-word.
+2. Always use informal singular "sen" (never formal "siz").
+3. Do not put periods (".") or question marks ("?") at the end of lines.
+Return ONLY the numbered lines in the exact format "[index] Turkish translation":
+${numberedInput}`;
+
+      const models = [
+        'gemini-2.0-flash',
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-flash',
+        'gemma-3-27b-it'
+      ];
+
+      for (const model of models) {
+        if ((deadModels.get(model) || 0) > Date.now()) continue;
+
         try {
-          aiMap = await tryFreeCloudAI(prompt, batch);
-        } catch (cloudErr) {
-          console.warn('Spicy TR: Bulut AI meşgul, Yedek Motor devreye giriyor...', cloudErr);
-        }
-      }
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey.trim()}`;
+          const res = await fetchWithTimeout(
+            url,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.25 }
+              })
+            },
+            5500
+          );
 
-      if (aiMap && aiMap.size > 0) {
-        const missed = [];
-        await Promise.all(
-          batch.map(async (rawText, idx) => {
-            const tr = aiMap.get(idx);
-            const romaja = isNonLatin(rawText) ? await buildHybridRomaja(rawText) : '';
-            if (tr && tr.trim()) {
+          if (res.status === 429 || res.status === 404 || res.status === 400) {
+            deadModels.set(model, Date.now() + 90000);
+            continue;
+          }
+          if (!res.ok) continue;
+
+          const json = await res.json();
+          const parts = json?.candidates?.[0]?.content?.parts || [];
+          const rawOutput = parts.filter(p => !p.thought && p.text).map(p => p.text).join('\n') || parts.map(p => p.text || '').join('\n');
+
+          const lineRegex = /^\s*(?:\*\*)?(?:\[(\d+)\]|(\d+)[.:)])(?:\*\*)?\s*[-–—:]?\s*(.+)$/gm;
+          let match;
+          let updatedCount = 0;
+
+          while ((match = lineRegex.exec(rawOutput)) !== null) {
+            const idx = parseInt(match[1] !== undefined ? match[1] : match[2], 10);
+            const trText = match[3].trim().replace(/^["']|["']$/g, '');
+            const rawText = batch[idx];
+            if (rawText && trText) {
+              const existing = cache.get(rawText) || {};
+              const romaja = existing.romaja || (isNonLatin(rawText) ? await buildHybridRomaja(rawText) : '');
               cache.set(rawText, {
-                tr: polishTurkishGrammar(tr, rawText),
+                tr: polishTurkish(trText, rawText),
                 romaja,
-                temp: false
+                aiUpgraded: true
               });
-            } else {
-              missed.push(rawText);
+              updatedCount++;
             }
-          })
-        );
-        if (missed.length > 0) {
-          await translateEmergencyFallback(missed, false);
-        }
-        saveCache();
-        updateDOMWithCache();
-      } else {
-        await translateEmergencyFallback(batch, false);
+          }
+
+          if (updatedCount > 0) {
+            saveCache();
+            updateDOMWithCache();
+            break;
+          }
+        } catch (e) {}
       }
-    } catch (e) {
-      console.error('Spicy TR Hata:', e);
     } finally {
-      isProcessing = false;
-      if (pendingFollowUp) {
-        pendingFollowUp = false;
-        clearTimeout(scanTimer);
-        scanTimer = setTimeout(processWholeSongTranslation, 500);
-      }
+      batch.forEach(t => inFlightAi.delete(t));
     }
   }
 
@@ -648,7 +551,9 @@ ${numberedLines}`;
     const updateBtnVisual = () => {
       btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''}`.trim();
       btn.textContent = geminiApiKey ? 'AI' : 'TR';
-      btn.title = `Aktif Çeviri Motoru: ${lastUsedEngine} | Sol Tık: Aç/Kapat | Sağ Tık: API Anahtarı & Önbellek Sıfırla`;
+      btn.title = geminiApiKey
+        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Gemini AI Anahtarını Yönet & Önbelleği Sıfırla (V18 Anlık Motor Aktif)'
+        : 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Ücretsiz Gemini AI Anahtarı Gir';
     };
     updateBtnVisual();
 
@@ -657,9 +562,7 @@ ${numberedLines}`;
       localStorage.setItem('spicy_tr_enabled', isEnabled);
       updateBtnVisual();
       document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => {
-        if (b.children.length > 0) {
-          b.style.setProperty('display', isEnabled ? 'flex' : 'none', 'important');
-        }
+        b.style.setProperty('display', isEnabled ? 'flex' : 'none', 'important');
       });
       triggerRecalc();
     };
@@ -667,9 +570,9 @@ ${numberedLines}`;
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       const input = prompt(
-        '🔥 Spicy Lyrics AI Çeviri & Romaja (LRClib + Çift AI Motorlu) 🔥\n\n' +
+        '🔥 Spicy Lyrics AI Çeviri & Romaja V18.0 🔥\n\n' +
         '• Ücretsiz Gemini API Anahtarınızı aşağıya yapıştırın.\n' +
-        '• Tamam\'a bastığınızda önbellek temizlenir ve şarkı yeniden çevrilir:',
+        '• Tamam\'a bastığınızda önbellek temizlenir ve şarkı anında yeniden çevrilir:',
         geminiApiKey
       );
       if (input !== null) {
@@ -680,38 +583,57 @@ ${numberedLines}`;
         localStorage.removeItem(STORAGE_CACHE_KEY);
         document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => b.remove());
         updateBtnVisual();
-        processWholeSongTranslation();
+        runScanNow();
       }
     };
 
     controls.appendChild(btn);
   }
 
-  function scanLines() {
+  function runScanNow() {
+    scanScheduled = false;
     injectToggleButton();
-    const lineEls = document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)');
-    let needsAction = false;
+
+    const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
+    const allVisibleTexts = [];
+    const missingFastLines = [];
 
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
       if (!text || text === '•••') return;
+
+      if (!allVisibleTexts.includes(text)) allVisibleTexts.push(text);
+
       if (cache.has(text)) {
-        if (!lineEl.querySelector('.spicy-tr-box')) {
-          renderSubtitles(lineEl, cache.get(text), text);
-        }
-      } else {
-        needsAction = true;
+        renderSubtitles(lineEl, cache.get(text), text);
+      } else if (!inFlightFast.has(text)) {
+        missingFastLines.push(text);
       }
     });
 
-    if (needsAction) {
-      clearTimeout(scanTimer);
-      scanTimer = setTimeout(processWholeSongTranslation, 500);
+    // 1. Eksik satırları HİÇ BEKLETMEDEN anında çevir ve ekrana bas!
+    if (missingFastLines.length > 0) {
+      translateInstantFastBatch(missingFastLines.slice(0, 30));
+    }
+
+    // 2. AI anahtarı varsa arka planda şiirsel AI güncellemesini çalıştır
+    if (geminiApiKey && geminiApiKey.trim().length > 10 && allVisibleTexts.length > 0) {
+      clearTimeout(aiTimer);
+      aiTimer = setTimeout(() => {
+        upgradeVisibleLinesWithGeminiAI(allVisibleTexts);
+      }, 600);
     }
   }
 
+  // KİLİTLENMEYEN TARAYICI: clearTimeout ile kendi kendini sıfırlamaz, 150ms içinde kesin çalışır!
+  function scheduleScan() {
+    if (scanScheduled) return;
+    scanScheduled = true;
+    setTimeout(runScanNow, 150);
+  }
+
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
-  window._spicyTrObserver = new MutationObserver(() => scanLines());
+  window._spicyTrObserver = new MutationObserver(() => scheduleScan());
   window._spicyTrObserver.observe(document.body, { childList: true, subtree: true });
-  scanLines();
+  runScanNow();
 })();
