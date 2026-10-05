@@ -1,34 +1,17 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 22.0.0 (Ultimate Text Protocol - Zero JSON Crashes)
-// DESCRIPTION: Unbreakable Gemini AI Turkish Localization & Romanization (No Regex Hacks)
+// VERSION: 23.0.0 (God Mode - Whole Song Context & Perfect Turkish)
+// DESCRIPTION: The ultimate, flawless lyric localizer. Reads the entire song, forces "Sen" tone, bridges sentences, and masters slang.
 
-(function spicyTurkishProV22Final() {
-  // Eski tüm bozuk önbellekleri temizle
+(function spicyTurkishProV23GodMode() {
+  // Eski tüm bozuk önbellekleri temizle ki çöpler ekrana gelmesin
   [
-    'spicy_tr_persistent_cache_v5',
-    'spicy_tr_persistent_cache_v6',
-    'spicy_tr_persistent_cache_v6_1',
-    'spicy_tr_persistent_cache_v7_0',
-    'spicy_tr_persistent_cache_v8_0',
-    'spicy_tr_persistent_cache_v9_0',
-    'spicy_tr_persistent_cache_v10_0',
-    'spicy_tr_persistent_cache_v11_0',
-    'spicy_tr_persistent_cache_v12_final',
-    'spicy_tr_persistent_cache_v13_clean',
-    'spicy_tr_persistent_cache_v14_universal',
-    'spicy_tr_persistent_cache_v15_universal',
-    'spicy_tr_persistent_cache_v15_master',
-    'spicy_tr_persistent_cache_v16_uncensored',
-    'spicy_tr_clean_v5_cache',
-    'spicy_tr_better_lyrics_v17',
-    'spicy_tr_instant_v18',
-    'spicy_tr_marketplace_v19',
-    'spicy_tr_stable_v20',
-    'spicy_tr_ultimate_v21'
+    'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
+    'spicy_tr_marketplace_v19', 'spicy_tr_stable_v20', 'spicy_tr_ultimate_v21',
+    'spicy_tr_unbreakable_v22'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_unbreakable_v22';
+  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v23';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -63,9 +46,7 @@
       filter: none !important;
       -webkit-filter: none !important;
     }
-
-    #SpicyLyricsPage .spicy-tr-box,
-    #SpicyLyricsPage .spicy-tr-box * {
+    #SpicyLyricsPage .spicy-tr-box, #SpicyLyricsPage .spicy-tr-box * {
       color: #ffffff !important;
       -webkit-text-fill-color: #ffffff !important;
       text-shadow: none !important;
@@ -79,7 +60,6 @@
       mask-image: none !important;
       -webkit-mask-image: none !important;
     }
-
     #SpicyLyricsPage .spicy-tr-box {
       flex-basis: 100% !important;
       width: 100% !important;
@@ -91,7 +71,6 @@
       line-height: 1.35 !important;
       opacity: 1 !important;
     }
-
     #SpicyLyricsPage .spicy-tr-romaja {
       font-size: 0.46em !important;
       font-weight: 500 !important;
@@ -100,7 +79,6 @@
       opacity: 1 !important;
       word-spacing: 2px !important;
     }
-
     #SpicyLyricsPage .spicy-tr-turkish {
       font-size: 0.52em !important;
       font-weight: 700 !important;
@@ -108,41 +86,15 @@
       -webkit-text-fill-color: #ffffff !important;
       opacity: 1 !important;
     }
-
-    #SpicyLyricsPage .line.NotSung,
-    #SpicyLyricsPage .line.Sung {
-      opacity: 0.78 !important;
-    }
-    #SpicyLyricsPage .line.Active {
-      opacity: 1 !important;
-    }
-
+    #SpicyLyricsPage .line.NotSung, #SpicyLyricsPage .line.Sung { opacity: 0.78 !important; }
+    #SpicyLyricsPage .line.Active { opacity: 1 !important; }
     #spicy-tr-toggle-btn {
-      background: rgba(255, 255, 255, 0.15);
-      color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.3);
-      border-radius: 50%;
-      width: 32px;
-      height: 32px;
-      font-size: 10px;
-      font-weight: 800;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      margin-left: 6px;
-      transition: all 0.2s ease;
+      background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%; width: 32px; height: 32px; font-size: 10px; font-weight: 800; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; margin-left: 6px; transition: all 0.2s ease;
     }
-    #spicy-tr-toggle-btn.active {
-      background: #1db954;
-      border-color: #1db954;
-      color: #000;
-    }
-    #spicy-tr-toggle-btn.ai-mode.active {
-      background: linear-gradient(135deg, #1db954, #00d2ff);
-      border-color: #00d2ff;
-      color: #000;
-    }
+    #spicy-tr-toggle-btn.active { background: #1db954; border-color: #1db954; color: #000; }
+    #spicy-tr-toggle-btn.ai-mode.active { background: linear-gradient(135deg, #1db954, #00d2ff); border-color: #00d2ff; color: #000; }
   `;
   document.getElementById('spicy-tr-style')?.remove();
   document.head.appendChild(style);
@@ -150,9 +102,7 @@
   let resizeTimer;
   function triggerRecalc() {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      window.dispatchEvent(new Event('resize'));
-    }, 100);
+    resizeTimer = setTimeout(() => { window.dispatchEvent(new Event('resize')); }, 100);
   }
 
   function isNonLatin(text) {
@@ -171,25 +121,22 @@
   function getCleanText(lineEl) {
     const clone = lineEl.cloneNode(true);
     clone.querySelectorAll('.spicy-tr-box').forEach(el => el.remove());
-
     let container = clone;
     while (container.children.length === 1 && container.children[0].children.length > 0) {
       container = container.children[0];
     }
-
     if (container.children.length > 1) {
       const words = [];
-      Array.from(container.childNodes).forEach(node => {
-        const txt = (node.textContent || '').trim();
+      Array.from(container.childNodes).forEach(n => {
+        const txt = (n.textContent || '').trim();
         if (txt) words.push(txt);
       });
       return words.join(' ').replace(/\s+/g, ' ').trim();
     }
-
     return clone.textContent.replace(/\s+/g, ' ').trim();
   }
 
-  // ROMAJA MOTORU (Bozulmaz Okunuş Motoru)
+  // Romaja
   async function fetchRomajaLine(rawText) {
     if (!isNonLatin(rawText)) return '';
     try {
@@ -199,14 +146,44 @@
       const json = await res.json();
       let rom = '';
       if (Array.isArray(json[0])) {
-        json[0].forEach(item => {
-          if (item[3]) rom += (rom ? ' ' : '') + item[3];
-        });
+        json[0].forEach(item => { if (item[3]) rom += (rom ? ' ' : '') + item[3]; });
       }
       return rom.trim();
-    } catch (e) {
-      return '';
-    }
+    } catch (e) { return ''; }
+  }
+
+  // AI Çökerse diye: Dünyanın en katı "SEN" ve "ARGO" filtresi
+  function forcePerfectTurkish(text, rawText) {
+    if (!text) return '';
+    let t = text.trim();
+    
+    // Klasik "Siz" çevirilerini yok et
+    t = t.replace(/\bVücudunuz\b/gi, 'Vücudun')
+         .replace(/\bbelirtin\b/gi, 'söyle')
+         .replace(/\bGözleriniz\b/gi, 'Gözlerin')
+         .replace(/\bZihniniz\b/gi, 'Zihnin')
+         .replace(/\bZihninizde\b/gi, 'Zihninde')
+         .replace(/\bSizin\b/gi, 'Senin')
+         .replace(/\bSize\b/gi, 'Sana')
+         .replace(/\bSizi\b/gi, 'Seni')
+         .replace(/\bSizde\b/gi, 'Sende')
+         .replace(/\bSizden\b/gi, 'Senden');
+
+    // Bebek -> Bebeğim, Rap Boku -> İyi rap
+    t = t.replace(/^Bebek$/gi, 'Bebeğim')
+         .replace(/\bBebek\b/gi, 'Bebeğim')
+         .replace(/Rap boku/gi, 'Rap')
+         .replace(/Gevşek bir ayakkabı bağı gibi/gi, 'Sana fena tutuluyorum');
+
+    // Genel çoğul iyelik ve fiil düzeltici (-niz -> -n)
+    t = t.replace(/([a-zçğıöşü]+)n[iıuü]z\b/gi, '$1n') 
+         .replace(/([a-zçğıöşü]+)s[iıuü]n[iıuü]z\b/gi, '$1sın'); 
+
+    // Noktalama temizliği
+    t = t.replace(/[.?]+$/, '');
+
+    if (t.length > 0) t = t.charAt(0).toUpperCase() + t.slice(1);
+    return t;
   }
 
   function renderSubtitles(lineEl, data, rawText) {
@@ -245,15 +222,12 @@
     });
   }
 
-  // KIRILMAZ AI AYRIŞTIRICI: JSON Hatası Yok! Sadece "[0] ..." Formatını Okur
   function parseUnbreakableAiOutput(rawOutput) {
     const map = new Map();
     if (!rawOutput) return map;
-
     const cleaned = rawOutput.replace(/^```[a-z]*\s*/im, '').replace(/```\s*$/im, '').trim();
     const lineRegex = /^\s*(?:\[(\d+)\]|(\d+)[.:)])\s*(.+)$/gm;
     let match;
-
     while ((match = lineRegex.exec(cleaned)) !== null) {
       const idx = parseInt(match[1] !== undefined ? match[1] : match[2], 10);
       let trText = match[3].trim().replace(/^["']|["']$/g, '');
@@ -264,33 +238,38 @@
     return map;
   }
 
-  // 1. MOTOR: SAF YAPAY ZEKA (TEXT PROTOCOL - SIFIR JSON HATASI!)
+  // 1. MOTOR: TAM ŞARKI BAĞLAMI, KUSURSUZ YERELLEŞTİRME AI
   async function translateWithGeminiAI(linesToTranslate, allVisibleLines) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
 
     const numberedInput = linesToTranslate.map((l, i) => `[${i}] ${l}`).join('\n');
+    const fullContext = allVisibleLines.join('\n');
 
-    const prompt = `You are a professional Turkish music lyricist and translator.
+    const prompt = `You are Turkey's ultimate, professional music translator. You translate songs perfectly, understanding the complete flow of the lyrics as a single poem.
 Song: "${songTitle}" by "${artist}"
 
-FULL LYRICS CONTEXT (Read this to understand the story and connect split sentences):
-${allVisibleLines.join('\n')}
+HERE IS THE ENTIRE SONG CONTEXT. Read it to understand the flow!
+---
+${fullContext}
+---
 
-TASK: Translate the numbered lyric lines below into natural, poetic, emotional Turkish.
+TASK: Translate the numbered lines below into flawless, highly poetic Turkish.
 
-STRICT RULES:
-1. SEAMLESS CONNECTION: Often a single sentence spans multiple lines (e.g. "Don't you know make me" / "The perfect kinda crazy"). Look at the context and connect them logically in Turkish (e.g. "Beni o mükemmel deliliğe sürüklediğini bilmiyor musun?"). NEVER translate them as broken separate fragments!
-2. IDIOMS & SLANG: "You want some rap shit" means "Biraz rap duymak istiyorsun", "I can rap shit" means "Pekâlâ, rap yapabilirim". "Turn me on like a night light" means "Beni bir gece lambası gibi yak/aydınlat". "Trippin' over you like a loose shoe lace" means "Gevşek bir ayakkabı bağı gibi sana takılıp düşüyorum/sana fena tutuldum". Do NOT censor explicit words.
-3. TRANSLATE MIXED LANGUAGES FULLY: If a line contains mixed languages (e.g. Thai + English like "ใครจะไม่อยากอยู่กับยู cuz you're my baby babe"), translate the ENTIRE meaning into Turkish (e.g. "Kim seninle olmak istemez ki, çünkü sen benim bebeğimsin"). Do NOT leave untranslated Thai or English words!
-4. 100% "SEN" TONE: Address the listener/lover exclusively in the informal singular "sen" (e.g., "gör", "biliyorsun", "hisset"). NEVER use the formal/plural "siz" (e.g., NEVER use "görün", "biliyorsunuz", "hissedin").
-5. NO PUNCTUATION: Do NOT add periods (".") or question marks ("?") to the end of the Turkish lines.
+CRITICAL RULES YOU MUST NOT BREAK:
+1. CONTEXTUAL BRIDGING (DO NOT TRANSLATE FRAGMENTS): Often sentences are split across lines. 
+   - E.g., "Don't you know make me" + "The perfect kinda crazy" MUST connect conceptually as "Beni o mükemmel deliliğe sürüklediğini" + "Bilmiyor musun?". 
+   - E.g., "When your body is a holiday" = "Vücudun tam bir cennet gibiyken"
+   - E.g., "Name a time and place" = "Bana bir zaman ve yer söyle"
+2. ONLY INFORMAL "SEN": ALWAYS use "sen", "vücudun", "söyle", "biliyorsun". NEVER use the formal "siz", "vücudunuz", "belirtin", "biliyorsunuz".
+3. MASTER SLANG & METAPHORS: 
+   - "Baby" or "Bae" = "Bebeğim" (Never "Bebek"). 
+   - "I can rap shit" = "İyi rap yaparım" or "Kralını rap yaparım" (Never "rap boku"). 
+   - "Trippin' over you like a loose shoe lace" = "Gevşek bir ayakkabı bağı gibi sana fena tutuluyorum".
+4. MIXED LANGUAGES: If a line has Thai+English (e.g. "ใครจะไม่อยากอยู่กับยู cuz you're my baby babe"), translate the WHOLE meaning into Turkish seamlessly: "Kim seninle olmak istemez ki, çünkü sen benim bebeğimsin". DO NOT leave foreign words behind.
+5. FORMAT: Return ONLY the numbered list. No markdown. No punctuation (. or ?) at the end of the lines.
 
-OUTPUT FORMAT: Return ONLY the numbered lines in this exact text format (NO JSON!):
-[0] Turkish translation
-[1] Turkish translation
-
-Lines to translate:
+Input lines to translate:
 ${numberedInput}`;
 
     const models = [
@@ -312,7 +291,7 @@ ${numberedInput}`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.25 }
+            generationConfig: { temperature: 0.3 }
           })
         });
 
@@ -325,9 +304,7 @@ ${numberedInput}`;
         const json = await res.json();
         const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         
-        // JSON hatası imkansız, doğrudan Regex ile numaralı satırları ayıkla
         const aiMap = parseUnbreakableAiOutput(rawOutput);
-
         if (aiMap.size === 0) throw new Error('Empty AI response');
 
         await Promise.all(
@@ -335,7 +312,8 @@ ${numberedInput}`;
             const tr = aiMap.get(idx);
             if (tr) {
               const romaja = isNonLatin(rawText) ? await fetchRomajaLine(rawText) : '';
-              cache.set(rawText, { tr, romaja });
+              // Ai çevirisini bile filtreden geçir, ne olur ne olmaz
+              cache.set(rawText, { tr: forcePerfectTurkish(tr, rawText), romaja });
             }
           })
         );
@@ -350,7 +328,7 @@ ${numberedInput}`;
     throw lastError;
   }
 
-  // 2. MOTOR: Saf V5 GTX Yedeği (AI Çökerse Devreye Girer)
+  // 2. MOTOR: GTX Yedeği (Kotasız Kalırsan Diye) + Kusursuz Düzeltici Filtre
   async function translateWithContextGTX(linesToTranslate) {
     const joinedBlock = linesToTranslate.join('.\n');
     const sourceLang = detectLang(joinedBlock);
@@ -388,7 +366,8 @@ ${numberedInput}`;
         }
 
         if (trLine) {
-            cache.set(rawText, { tr: trLine, romaja: romaja.trim() });
+            // Google Translate'in "Vücudunuz", "Belirtin" çöplerini anında temizler
+            cache.set(rawText, { tr: forcePerfectTurkish(trLine, rawText), romaja: romaja.trim() });
         }
       })
     );
@@ -413,7 +392,7 @@ ${numberedInput}`;
       }
       await translateWithContextGTX(missingLines);
     } catch (e) {
-      console.error('Spicy TR V22 Hata:', e);
+      console.error('Spicy TR V23 Hata:', e);
     } finally {
       missingLines.forEach(t => inFlight.delete(t));
     }
@@ -429,7 +408,7 @@ ${numberedInput}`;
       btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''}`.trim();
       btn.textContent = geminiApiKey ? 'AI' : 'TR';
       btn.title = geminiApiKey
-        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: Gemini AI Anahtarını Yönet & Önbelleği Sıfırla (Ultimate AI Aktif)'
+        ? 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: API Anahtarını Yönet & Önbelleği Sıfırla (God Mode Aktif)'
         : 'Sol Tık: Çeviriyi Aç/Kapat | Sağ Tık: %100 Kusursuz Çeviri İçin Ücretsiz Gemini AI Anahtarı Gir';
     };
     updateBtnVisual();
@@ -447,8 +426,8 @@ ${numberedInput}`;
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       const input = prompt(
-        '🌟 Spicy Lyrics AI Çeviri & Romaja V22.0 (ULTIMATE) 🌟\n\n' +
-        'Ücretsiz Gemini API anahtarınızı buraya yapıştırın (aistudio.google.com/apikey):\n' +
+        '🌟 Spicy Lyrics AI Çeviri V23.0 (GOD MODE) 🌟\n\n' +
+        'Ücretsiz Gemini API anahtarınızı buraya yapıştırın:\n' +
         'Tamam\'a bastığınızda eski önbellek sıfırlanır ve şarkı yeniden çevrilir:',
         geminiApiKey
       );
@@ -463,7 +442,6 @@ ${numberedInput}`;
         scanLines();
       }
     };
-
     controls.appendChild(btn);
   }
 
