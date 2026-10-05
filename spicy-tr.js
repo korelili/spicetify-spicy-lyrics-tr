@@ -1,9 +1,9 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 21.0.0 (5 Ekim 2026 - Ultimate Marketplace Release)
-// DESCRIPTION: Pure Context-Aware Gemini AI Turkish Localization & Romanization (Zero Regex Hacks)
+// VERSION: 22.0.0 (Ultimate Text Protocol - Zero JSON Crashes)
+// DESCRIPTION: Unbreakable Gemini AI Turkish Localization & Romanization (No Regex Hacks)
 
-(function spicyTurkishProV21Final() {
+(function spicyTurkishProV22Final() {
   // Eski tüm bozuk önbellekleri temizle
   [
     'spicy_tr_persistent_cache_v5',
@@ -24,10 +24,11 @@
     'spicy_tr_better_lyrics_v17',
     'spicy_tr_instant_v18',
     'spicy_tr_marketplace_v19',
-    'spicy_tr_stable_v20'
+    'spicy_tr_stable_v20',
+    'spicy_tr_ultimate_v21'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_ultimate_v21';
+  const STORAGE_CACHE_KEY = 'spicy_tr_unbreakable_v22';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -188,6 +189,26 @@
     return clone.textContent.replace(/\s+/g, ' ').trim();
   }
 
+  // ROMAJA MOTORU (Bozulmaz Okunuş Motoru)
+  async function fetchRomajaLine(rawText) {
+    if (!isNonLatin(rawText)) return '';
+    try {
+      const lang = detectLang(rawText);
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${lang}&tl=tr&dt=rm&q=${encodeURIComponent(rawText)}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      let rom = '';
+      if (Array.isArray(json[0])) {
+        json[0].forEach(item => {
+          if (item[3]) rom += (rom ? ' ' : '') + item[3];
+        });
+      }
+      return rom.trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
   function renderSubtitles(lineEl, data, rawText) {
     let box = lineEl.querySelector('.spicy-tr-box');
     if (box) box.remove();
@@ -224,33 +245,54 @@
     });
   }
 
-  // 1. MOTOR: SAF YAPAY ZEKA (Hiçbir Regex/Yama Yok. Her Şeyi Sadece Prompt İle Yapar)
+  // KIRILMAZ AI AYRIŞTIRICI: JSON Hatası Yok! Sadece "[0] ..." Formatını Okur
+  function parseUnbreakableAiOutput(rawOutput) {
+    const map = new Map();
+    if (!rawOutput) return map;
+
+    const cleaned = rawOutput.replace(/^```[a-z]*\s*/im, '').replace(/```\s*$/im, '').trim();
+    const lineRegex = /^\s*(?:\[(\d+)\]|(\d+)[.:)])\s*(.+)$/gm;
+    let match;
+
+    while ((match = lineRegex.exec(cleaned)) !== null) {
+      const idx = parseInt(match[1] !== undefined ? match[1] : match[2], 10);
+      let trText = match[3].trim().replace(/^["']|["']$/g, '');
+      if (!isNaN(idx) && trText) {
+        map.set(idx, trText);
+      }
+    }
+    return map;
+  }
+
+  // 1. MOTOR: SAF YAPAY ZEKA (TEXT PROTOCOL - SIFIR JSON HATASI!)
   async function translateWithGeminiAI(linesToTranslate, allVisibleLines) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
 
-    const prompt = `You are a professional Turkish music lyricist and translator (like the best Turkish lyric translation channels on YouTube).
+    const numberedInput = linesToTranslate.map((l, i) => `[${i}] ${l}`).join('\n');
+
+    const prompt = `You are a professional Turkish music lyricist and translator.
 Song: "${songTitle}" by "${artist}"
 
-FULL VISIBLE LYRICS CONTEXT (Read this first so split sentences connect perfectly!):
-${JSON.stringify(allVisibleLines)}
+FULL LYRICS CONTEXT (Read this to understand the story and connect split sentences):
+${allVisibleLines.join('\n')}
 
-TASK: Translate the following song lyric lines into natural, poetic, emotional Turkish. Provide smooth Latin romanization for Asian/Cyrillic scripts.
+TASK: Translate the numbered lyric lines below into natural, poetic, emotional Turkish.
 
 STRICT RULES:
-1. SEAMLESS SENTENCE CONNECTION: Often a single sentence spans multiple lines (e.g. "Don't you know make me" / "The perfect kinda crazy"). Look at the context and connect them logically in Turkish (e.g. "Beni o mükemmel deliliğe sürüklediğini bilmiyor musun?"). NEVER translate them as broken separate fragments.
-2. TRANSLATE MIXED LANGUAGES FULLY: If a line contains mixed languages (e.g. Thai + English like "ใครจะไม่อยากอยู่กับยู cuz you're my baby babe"), translate the ENTIRE line's meaning into Turkish. Do NOT leave untranslated Thai or English words in the Turkish result!
-3. 100% "SEN" TONE: Address the listener/lover exclusively in the informal singular "sen" (e.g., "gör", "biliyorsun", "hisset"). NEVER use the formal/plural "siz" (e.g., NEVER use "görün", "biliyorsunuz", "hissedin").
-4. NO CENSORSHIP & NO PUNCTUATION: Translate slang, idioms, and explicit words naturally without censorship. Do NOT add periods (".") or question marks ("?") to the end of the Turkish lines. Let it flow like poetry.
-5. ROMAJA: For the 'romaja' field, provide the Latin alphabet pronunciation ONLY for Korean, Japanese, Thai, Chinese, or Cyrillic characters. Keep any English words in the line exactly as they are. If the original line is purely English/Spanish, set "romaja" to "".
+1. SEAMLESS CONNECTION: Often a single sentence spans multiple lines (e.g. "Don't you know make me" / "The perfect kinda crazy"). Look at the context and connect them logically in Turkish (e.g. "Beni o mükemmel deliliğe sürüklediğini bilmiyor musun?"). NEVER translate them as broken separate fragments!
+2. IDIOMS & SLANG: "You want some rap shit" means "Biraz rap duymak istiyorsun", "I can rap shit" means "Pekâlâ, rap yapabilirim". "Turn me on like a night light" means "Beni bir gece lambası gibi yak/aydınlat". "Trippin' over you like a loose shoe lace" means "Gevşek bir ayakkabı bağı gibi sana takılıp düşüyorum/sana fena tutuldum". Do NOT censor explicit words.
+3. TRANSLATE MIXED LANGUAGES FULLY: If a line contains mixed languages (e.g. Thai + English like "ใครจะไม่อยากอยู่กับยู cuz you're my baby babe"), translate the ENTIRE meaning into Turkish (e.g. "Kim seninle olmak istemez ki, çünkü sen benim bebeğimsin"). Do NOT leave untranslated Thai or English words!
+4. 100% "SEN" TONE: Address the listener/lover exclusively in the informal singular "sen" (e.g., "gör", "biliyorsun", "hisset"). NEVER use the formal/plural "siz" (e.g., NEVER use "görün", "biliyorsunuz", "hissedin").
+5. NO PUNCTUATION: Do NOT add periods (".") or question marks ("?") to the end of the Turkish lines.
 
-Return ONLY a valid JSON array of objects in the exact same order as the input lines. The array must contain exactly ${linesToTranslate.length} objects.
-Keys must be exactly "tr" and "romaja". Do not use markdown blocks.
+OUTPUT FORMAT: Return ONLY the numbered lines in this exact text format (NO JSON!):
+[0] Turkish translation
+[1] Turkish translation
 
-Input lines:
-${JSON.stringify(linesToTranslate)}`;
+Lines to translate:
+${numberedInput}`;
 
-    // Model rotasyonu: Biri kota veya hata verirse anında diğerine geçer.
     const models = [
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
@@ -270,7 +312,7 @@ ${JSON.stringify(linesToTranslate)}`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.25 }
+            generationConfig: { temperature: 0.25 }
           })
         });
 
@@ -281,31 +323,22 @@ ${JSON.stringify(linesToTranslate)}`;
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const json = await res.json();
-        const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+        const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         
-        let parsed;
-        try {
-            // Markdown temizliği yapıp JSON'ı parse et
-            const cleanJsonStr = rawOutput.replace(/^```[a-z]*\s*/im, '').replace(/```\s*$/im, '').trim();
-            parsed = JSON.parse(cleanJsonStr);
-        } catch (e) {
-            // Eğer JSON parse edilemezse array içinden çekmeyi dene
-            const match = rawOutput.match(/\[[\s\S]*\]/);
-            if (match) parsed = JSON.parse(match[0]);
-            else throw new Error("Invalid JSON");
-        }
+        // JSON hatası imkansız, doğrudan Regex ile numaralı satırları ayıkla
+        const aiMap = parseUnbreakableAiOutput(rawOutput);
 
-        if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty JSON array');
+        if (aiMap.size === 0) throw new Error('Empty AI response');
 
-        linesToTranslate.forEach((rawText, idx) => {
-          if (parsed[idx]) {
-            const tr = (parsed[idx].tr || '').trim();
-            const romaja = (parsed[idx].romaja || '').trim();
+        await Promise.all(
+          linesToTranslate.map(async (rawText, idx) => {
+            const tr = aiMap.get(idx);
             if (tr) {
+              const romaja = isNonLatin(rawText) ? await fetchRomajaLine(rawText) : '';
               cache.set(rawText, { tr, romaja });
             }
-          }
-        });
+          })
+        );
 
         saveCache();
         updateDOMWithCache();
@@ -317,7 +350,7 @@ ${JSON.stringify(linesToTranslate)}`;
     throw lastError;
   }
 
-  // 2. MOTOR: Saf V5 GTX Yedeği (Sadece AI Anahtarı Yoksa Çalışır)
+  // 2. MOTOR: Saf V5 GTX Yedeği (AI Çökerse Devreye Girer)
   async function translateWithContextGTX(linesToTranslate) {
     const joinedBlock = linesToTranslate.join('.\n');
     const sourceLang = detectLang(joinedBlock);
@@ -367,7 +400,6 @@ ${JSON.stringify(linesToTranslate)}`;
     const missingLines = allVisibleLines.filter(t => !cache.has(t) && !inFlight.has(t));
     if (missingLines.length === 0) return;
     
-    // İşlemdekileri işaretle
     missingLines.forEach(t => inFlight.add(t));
 
     try {
@@ -379,10 +411,9 @@ ${JSON.stringify(linesToTranslate)}`;
           console.warn('Spicy TR: AI Modu hatası, GTX motoruna geçiliyor...', aiErr);
         }
       }
-      // AI yoksa veya hata verirse GTX çalıştır
       await translateWithContextGTX(missingLines);
     } catch (e) {
-      console.error('Spicy TR V21 Hata:', e);
+      console.error('Spicy TR V22 Hata:', e);
     } finally {
       missingLines.forEach(t => inFlight.delete(t));
     }
@@ -416,7 +447,7 @@ ${JSON.stringify(linesToTranslate)}`;
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       const input = prompt(
-        '🌟 Spicy Lyrics AI Çeviri & Romaja V21.0 (ULTIMATE) 🌟\n\n' +
+        '🌟 Spicy Lyrics AI Çeviri & Romaja V22.0 (ULTIMATE) 🌟\n\n' +
         'Ücretsiz Gemini API anahtarınızı buraya yapıştırın (aistudio.google.com/apikey):\n' +
         'Tamam\'a bastığınızda eski önbellek sıfırlanır ve şarkı yeniden çevrilir:',
         geminiApiKey
@@ -436,7 +467,6 @@ ${JSON.stringify(linesToTranslate)}`;
     controls.appendChild(btn);
   }
 
-  // Senin asıl V5'indeki saf, bozulmaz tarayıcı mantığı
   function scanLines() {
     injectToggleButton();
     const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
