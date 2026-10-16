@@ -1,22 +1,21 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 27.0.0 (Ultimate Masterpiece - Romaja Restored & Zero-Shift Anchoring)
-// DESCRIPTION: The definitive, blazing-fast lyric localizer with flawless Romaja, strict Sen tone, and zero line-shift.
+// VERSION: 28.0.0 (Masterpiece - Chunked & 100% Line Coverage)
+// DESCRIPTION: Bulletproof chunking mechanism ensures zero skipped lines, perfect Romaja, and strict Sen tone.
 
-(function spicyTurkishProV27() {
+(function spicyTurkishProV28() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V27]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V27]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V27]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V28]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V28]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V28]', 'color:#ff4b4b;font-weight:bold', ...args); };
 
-  // Temizlik
   [
     'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
     'spicy_tr_marketplace_v19', 'spicy_tr_stable_v20', 'spicy_tr_ultimate_v21',
-    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26'
+    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26', 'spicy_tr_godmode_v27'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v27';
+  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v28';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -32,6 +31,8 @@
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
+
+  const CHUNK_SIZE = 12; // Her istekte max 12 satır -> yapay zeka asla atlamaz, kafası karışmaz
 
   function markFailed(text) {
     failedUntil.set(text, Date.now() + FAILURE_COOLDOWN_MS);
@@ -142,7 +143,6 @@
     return clone.textContent.replace(/\s+/g, ' ').trim();
   }
 
-  // GTX Romaja yedeği
   async function fetchRomajaLine(rawText) {
     if (!isNonLatin(rawText)) return '';
     try {
@@ -192,7 +192,6 @@
     box = document.createElement('div');
     box.className = 'spicy-tr-box';
 
-    // Romaja varsa mutlaka ekle
     if (data.romaja && isNonLatin(rawText)) {
       const romEl = document.createElement('div');
       romEl.className = 'spicy-tr-romaja';
@@ -248,18 +247,17 @@
     'gemini-2.5-flash'
   ];
 
-  async function translateWithGeminiAI(linesToTranslate) {
+  async function translateChunkWithGemini(chunkLines) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
-
-    const inputLinesText = linesToTranslate.map(l => `- ${l}`).join('\n');
+    const inputLinesText = chunkLines.map(l => `- ${l}`).join('\n');
 
     const prompt = `You are Turkey's ultimate, professional music translator, localizing song lyrics into natural, idiomatic Turkish.
 Song: "${songTitle}" by "${artist}"
 
 CRITICAL RULES:
 1. ALWAYS INFORMAL "SEN": ALWAYS use "sen", "vücudun", "bebeğim", "söyle", "biliyorsun". NEVER use "siz", "vücudunuz".
-2. NO LINE SHIFT: Each SRC line must have its exact corresponding block. Never skip or shift lines.
+2. NO LINE SKIP OR SHIFT: You MUST translate EVERY SINGLE line listed below. Do not omit any line.
 3. OUTPUT FORMAT: For EVERY line listed below, output exactly this format separated by ---:
 SRC: <exact original line>
 ROM: <accurate Latin romanization if non-Latin script, otherwise write NONE>
@@ -281,7 +279,7 @@ ${inputLinesText}`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 8192 }
+            generationConfig: { temperature: 0.3, maxOutputTokens: 4096 }
           })
         });
 
@@ -296,14 +294,14 @@ ${inputLinesText}`;
         
         if (parsed.length === 0) throw new Error('Empty AI response');
 
-        const normToRaw = new Map(linesToTranslate.map(l => [normalize(l), l]));
+        const normToRaw = new Map(chunkLines.map(l => [normalize(l), l]));
         const matched = new Set();
 
         parsed.forEach(({ src, rom, tr }) => {
           const key = normalize(src);
           let rawLine = normToRaw.get(key);
           if (!rawLine) {
-            rawLine = linesToTranslate.find(l => !matched.has(l) && (normalize(l).includes(key) || key.includes(normalize(l))) && key.length > 2);
+            rawLine = chunkLines.find(l => !matched.has(l) && (normalize(l).includes(key) || key.includes(normalize(l))) && key.length > 2);
           }
           if (rawLine && !matched.has(rawLine)) {
             matched.add(rawLine);
@@ -317,7 +315,7 @@ ${inputLinesText}`;
         saveCache();
         updateDOMWithCache();
 
-        const leftover = linesToTranslate.filter(l => !matched.has(l));
+        const leftover = chunkLines.filter(l => !matched.has(l));
         return leftover;
       } catch (err) {
         lastError = err;
@@ -355,20 +353,28 @@ ${inputLinesText}`;
     if (missing.length === 0) return;
 
     missing.forEach(t => inFlight.add(t));
-    log('Çeviri kuyruğu işleniyor:', missing.length, 'satır');
+    log('Çeviri kuyruğu işleniyor (Chunked):', missing.length, 'satır');
+
+    // Satırları 12'şerli parçalara böl (Gemini atlama yapmasın diye)
+    const chunks = [];
+    for (let i = 0; i < missing.length; i += CHUNK_SIZE) {
+      chunks.push(missing.slice(i, i + CHUNK_SIZE));
+    }
 
     try {
-      let leftover = missing;
-      if (geminiApiKey && geminiApiKey.trim().length > 10) {
-        try {
-          leftover = await translateWithGeminiAI(missing);
-        } catch (e) {
-          warn('Gemini hatası, GTX yedek motoruna dönülüyor', e);
-          leftover = missing;
+      for (const chunk of chunks) {
+        let leftover = chunk;
+        if (geminiApiKey && geminiApiKey.trim().length > 10) {
+          try {
+            leftover = await translateChunkWithGemini(chunk);
+          } catch (e) {
+            warn('Gemini chunk hatası, GTX yedek motoruna dönülüyor', e);
+            leftover = chunk;
+          }
         }
-      }
-      if (leftover && leftover.length > 0) {
-        await translateWithGTX(leftover);
+        if (leftover && leftover.length > 0) {
+          await translateWithGTX(leftover);
+        }
       }
     } catch (e) {
       err('Kuyruk hatası', e);
@@ -402,7 +408,7 @@ ${inputLinesText}`;
 
     btn.oncontextmenu = (e) => {
       e.preventDefault();
-      const input = prompt('🌟 Spicy Lyrics V27 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
+      const input = prompt('🌟 Spicy Lyrics V28 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
       if (input !== null) {
         geminiApiKey = input.trim();
         localStorage.setItem('spicy_tr_gemini_key', geminiApiKey);
