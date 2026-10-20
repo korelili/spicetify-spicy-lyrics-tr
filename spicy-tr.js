@@ -1,22 +1,22 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 29.0.0 (Robust First-Load & Zero-Skip Engine)
-// DESCRIPTION: Fixes first-time song loading issues, ensures zero skipped lines, perfect Romaja, and strict Sen tone.
+// VERSION: 30.0.0 (Ultimate Flawless - Aggressive Observer & Zero-Skip)
+// DESCRIPTION: Eliminates skipped lines caused by virtual scrolling and pending requests.
 
-(function spicyTurkishProV29() {
+(function spicyTurkishProV30() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V29]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V29]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V29]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V30]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V30]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V30]', 'color:#ff4b4b;font-weight:bold', ...args); };
 
   [
     'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
     'spicy_tr_marketplace_v19', 'spicy_tr_stable_v20', 'spicy_tr_ultimate_v21',
     'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26', 
-    'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28'
+    'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28', 'spicy_tr_godmode_v29'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v29';
+  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v30';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -25,15 +25,16 @@
   }
 
   const cache = new Map(Object.entries(savedCache));
-  const inFlight = new Set();
+  const inFlight = new Map(); // text -> timestamp (deadlock engellemek için)
   const failedUntil = new Map();
-  const FAILURE_COOLDOWN_MS = 8000;
+  const FAILURE_COOLDOWN_MS = 5000;
+  const IN_FLIGHT_TIMEOUT_MS = 6000;
   const deadModels = new Map();
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
 
-  const CHUNK_SIZE = 12;
+  const CHUNK_SIZE = 10;
 
   function markFailed(text) {
     failedUntil.set(text, Date.now() + FAILURE_COOLDOWN_MS);
@@ -43,7 +44,7 @@
     try {
       const entries = Array.from(cache.entries())
         .filter(([, v]) => v && (v.tr || v.romaja))
-        .slice(-4000);
+        .slice(-5000);
       localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
     } catch (e) {}
   }
@@ -350,11 +351,18 @@ ${inputLinesText}`;
 
   async function processQueue(allVisibleLines) {
     const now = Date.now();
-    const missing = allVisibleLines.filter(t => !cache.has(t) && !inFlight.has(t) && (failedUntil.get(t) || 0) <= now);
+    const missing = allVisibleLines.filter(t => {
+      if (cache.has(t)) return false;
+      if ((failedUntil.get(t) || 0) > now) return false;
+      const flightTime = inFlight.get(t);
+      if (flightTime && (now - flightTime) < IN_FLIGHT_TIMEOUT_MS) return false;
+      return true;
+    });
+
     if (missing.length === 0) return;
 
-    missing.forEach(t => inFlight.add(t));
-    log('Çeviri kuyruğu işleniyor (Robust Chunked):', missing.length, 'satır');
+    missing.forEach(t => inFlight.set(t, now));
+    log('Kuyruk taranıyor & çevriliyor (V30 Aggressive):', missing.length, 'satır');
 
     const chunks = [];
     for (let i = 0; i < missing.length; i += CHUNK_SIZE) {
@@ -368,7 +376,7 @@ ${inputLinesText}`;
           try {
             leftover = await translateChunkWithGemini(chunk);
           } catch (e) {
-            warn('Gemini chunk hatası, GTX yedek motoruna dönülüyor', e);
+            warn('Gemini hatası, GTX yedek motoruna geçiliyor', e);
             leftover = chunk;
           }
         }
@@ -392,7 +400,7 @@ ${inputLinesText}`;
     const updateBtnVisual = () => {
       btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''}`.trim();
       btn.textContent = geminiApiKey ? 'AI' : 'TR';
-      btn.title = geminiApiKey ? 'God Mode Aktif' : 'API Anahtarı Gir';
+      btn.title = geminiApiKey ? 'God Mode V30 Aktif' : 'API Anahtarı Gir';
     };
     updateBtnVisual();
 
@@ -408,11 +416,13 @@ ${inputLinesText}`;
 
     btn.oncontextmenu = (e) => {
       e.preventDefault();
-      const input = prompt('🌟 Spicy Lyrics V29 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
+      const input = prompt('🌟 Spicy Lyrics V30 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
       if (input !== null) {
         geminiApiKey = input.trim();
         localStorage.setItem('spicy_tr_gemini_key', geminiApiKey);
         cache.clear();
+        inFlight.clear();
+        failedUntil.clear();
         localStorage.removeItem(STORAGE_CACHE_KEY);
         document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => b.remove());
         updateBtnVisual();
@@ -427,10 +437,11 @@ ${inputLinesText}`;
     const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
     const allVisibleTexts = [];
     let hasMissing = false;
+    const now = Date.now();
 
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
-      if (!text || text === '•••' || text.length < 2) return; // Placeholder'ları ve çöpleri engelle
+      if (!text || text === '•••') return;
 
       if (!allVisibleTexts.includes(text)) {
         allVisibleTexts.push(text);
@@ -440,8 +451,11 @@ ${inputLinesText}`;
         if (!lineEl.querySelector('.spicy-tr-box')) {
           renderSubtitles(lineEl, cache.get(text), text);
         }
-      } else if (!inFlight.has(text)) {
-        hasMissing = true;
+      } else {
+        const flightTime = inFlight.get(text);
+        if (!flightTime || (now - flightTime) >= IN_FLIGHT_TIMEOUT_MS) {
+          hasMissing = true;
+        }
       }
     });
 
@@ -449,26 +463,30 @@ ${inputLinesText}`;
       clearTimeout(batchTimer);
       batchTimer = setTimeout(() => {
         processQueue(allVisibleTexts);
-      }, 150);
+      }, 100);
     }
   }
 
-  // İlk açılışta ve yeni şarkılarda sözlerin sunucudan yüklenme gecikmesini yakalamak için kademeli tarama (Multi-stage scan)
   function triggerMultiStageScan() {
     scanLines();
-    setTimeout(scanLines, 300);
-    setTimeout(scanLines, 800);
-    setTimeout(scanLines, 1500);
+    setTimeout(scanLines, 200);
+    setTimeout(scanLines, 600);
+    setTimeout(scanLines, 1200);
+    setTimeout(scanLines, 2500);
   }
 
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
   window._spicyTrObserver = new MutationObserver(() => scanLines());
   window._spicyTrObserver.observe(document.body, { childList: true, subtree: true });
 
-  // Şarkı değişimlerinde kademeli taramayı tetikle
-  Spicetify.Player.addEventListener("songchange", () => {
-    setTimeout(triggerMultiStageScan, 200);
-  });
+  // Scroll yapıldıkça ekrana yeni giren satırları anında yakala
+  window.addEventListener('scroll', () => scanLines(), true);
+
+  if (Spicetify?.Player) {
+    Spicetify.Player.addEventListener("songchange", () => {
+      setTimeout(triggerMultiStageScan, 150);
+    });
+  }
 
   triggerMultiStageScan();
 })();
