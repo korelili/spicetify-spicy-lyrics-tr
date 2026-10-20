@@ -1,21 +1,22 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 28.0.0 (Masterpiece - Chunked & 100% Line Coverage)
-// DESCRIPTION: Bulletproof chunking mechanism ensures zero skipped lines, perfect Romaja, and strict Sen tone.
+// VERSION: 29.0.0 (Robust First-Load & Zero-Skip Engine)
+// DESCRIPTION: Fixes first-time song loading issues, ensures zero skipped lines, perfect Romaja, and strict Sen tone.
 
-(function spicyTurkishProV28() {
+(function spicyTurkishProV29() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V28]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V28]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V28]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V29]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V29]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V29]', 'color:#ff4b4b;font-weight:bold', ...args); };
 
   [
     'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
     'spicy_tr_marketplace_v19', 'spicy_tr_stable_v20', 'spicy_tr_ultimate_v21',
-    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26', 'spicy_tr_godmode_v27'
+    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26', 
+    'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v28';
+  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v29';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -26,13 +27,13 @@
   const cache = new Map(Object.entries(savedCache));
   const inFlight = new Set();
   const failedUntil = new Map();
-  const FAILURE_COOLDOWN_MS = 10000;
+  const FAILURE_COOLDOWN_MS = 8000;
   const deadModels = new Map();
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
 
-  const CHUNK_SIZE = 12; // Her istekte max 12 satır -> yapay zeka asla atlamaz, kafası karışmaz
+  const CHUNK_SIZE = 12;
 
   function markFailed(text) {
     failedUntil.set(text, Date.now() + FAILURE_COOLDOWN_MS);
@@ -353,9 +354,8 @@ ${inputLinesText}`;
     if (missing.length === 0) return;
 
     missing.forEach(t => inFlight.add(t));
-    log('Çeviri kuyruğu işleniyor (Chunked):', missing.length, 'satır');
+    log('Çeviri kuyruğu işleniyor (Robust Chunked):', missing.length, 'satır');
 
-    // Satırları 12'şerli parçalara böl (Gemini atlama yapmasın diye)
     const chunks = [];
     for (let i = 0; i < missing.length; i += CHUNK_SIZE) {
       chunks.push(missing.slice(i, i + CHUNK_SIZE));
@@ -408,7 +408,7 @@ ${inputLinesText}`;
 
     btn.oncontextmenu = (e) => {
       e.preventDefault();
-      const input = prompt('🌟 Spicy Lyrics V28 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
+      const input = prompt('🌟 Spicy Lyrics V29 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
       if (input !== null) {
         geminiApiKey = input.trim();
         localStorage.setItem('spicy_tr_gemini_key', geminiApiKey);
@@ -430,7 +430,7 @@ ${inputLinesText}`;
 
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
-      if (!text || text === '•••') return;
+      if (!text || text === '•••' || text.length < 2) return; // Placeholder'ları ve çöpleri engelle
 
       if (!allVisibleTexts.includes(text)) {
         allVisibleTexts.push(text);
@@ -453,8 +453,22 @@ ${inputLinesText}`;
     }
   }
 
+  // İlk açılışta ve yeni şarkılarda sözlerin sunucudan yüklenme gecikmesini yakalamak için kademeli tarama (Multi-stage scan)
+  function triggerMultiStageScan() {
+    scanLines();
+    setTimeout(scanLines, 300);
+    setTimeout(scanLines, 800);
+    setTimeout(scanLines, 1500);
+  }
+
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
   window._spicyTrObserver = new MutationObserver(() => scanLines());
   window._spicyTrObserver.observe(document.body, { childList: true, subtree: true });
-  scanLines();
+
+  // Şarkı değişimlerinde kademeli taramayı tetikle
+  Spicetify.Player.addEventListener("songchange", () => {
+    setTimeout(triggerMultiStageScan, 200);
+  });
+
+  triggerMultiStageScan();
 })();
