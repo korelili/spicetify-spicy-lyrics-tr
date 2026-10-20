@@ -1,22 +1,39 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 30.0.0 (Ultimate Flawless - Aggressive Observer & Zero-Skip)
-// DESCRIPTION: Eliminates skipped lines caused by virtual scrolling and pending requests.
+// VERSION: 33.1.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability Patch)
+// DESCRIPTION: Same as v33.0.0, with two targeted fixes for "delay + skipped lines":
+//   1) translateWithGTX used to fall back to `trLine = rawText` when no real
+//      translation came back, and still cache.set() that dud entry. Since the line
+//      was then "in cache", it was never retried again - one failed network call
+//      permanently killed that line (and its romaji) for the rest of the session.
+//      Now a genuine failure marks the line with a short cooldown instead of
+//      caching garbage, so the next scan retries it automatically.
+//   2) processQueue fired ALL chunks at once with no limit (Promise.all over every
+//      chunk), and the GTX per-line fallback fired all its requests unthrottled
+//      too. On a long song (many chunks) or after a Gemini failure cascading into
+//      GTX, this burst tripped Google's rate limiting, which is what produced both
+//      the extra delay (retries, dead model cooldowns) and the permanently-skipped
+//      lines from fix #1. Chunk-level concurrency is now capped (4 at once - still
+//      effectively "all at once" for a typical song with 3-5 chunks) and GTX's
+//      per-line fallback requests are lightly queued instead of fired in one burst.
+//   Nothing else was changed: same prompt, same models, same CHUNK_SIZE, same
+//   multi-stage scan / songchange / scroll triggers, same getCleanText.
 
-(function spicyTurkishProV30() {
+(function spicyTurkishProV33() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V30]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V30]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V30]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V33]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V33]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V33]', 'color:#ff4b4b;font-weight:bold', ...args); };
 
   [
     'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
     'spicy_tr_marketplace_v19', 'spicy_tr_stable_v20', 'spicy_tr_ultimate_v21',
-    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26', 
-    'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28', 'spicy_tr_godmode_v29'
+    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26',
+    'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28', 'spicy_tr_godmode_v29',
+    'spicy_tr_godmode_v30', 'spicy_tr_godmode_v31', 'spicy_tr_godmode_v32'
   ].forEach(k => localStorage.removeItem(k));
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v30';
+  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v33';
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -25,26 +42,44 @@
   }
 
   const cache = new Map(Object.entries(savedCache));
-  const inFlight = new Map(); // text -> timestamp (deadlock engellemek için)
-  const failedUntil = new Map();
-  const FAILURE_COOLDOWN_MS = 5000;
-  const IN_FLIGHT_TIMEOUT_MS = 6000;
+  const inFlight = new Set();
+  const failedUntil = new Map(); // rawText -> timestamp; don't retry before this
+  const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
 
-  const CHUNK_SIZE = 10;
+  const CHUNK_SIZE = 12;
 
   function markFailed(text) {
     failedUntil.set(text, Date.now() + FAILURE_COOLDOWN_MS);
+  }
+
+  // Small concurrency-limited queue so requests go out a few at a time instead of
+  // all in one burst (which is what was tripping rate limiting).
+  async function runThrottled(items, worker, { concurrency = 3, spacingMs = 120 } = {}) {
+    let i = 0;
+    async function lane() {
+      while (i < items.length) {
+        const idx = i++;
+        try {
+          await worker(items[idx], idx);
+        } catch (e) {
+          err('runThrottled worker error', e);
+        }
+        if (i < items.length) await new Promise(r => setTimeout(r, spacingMs));
+      }
+    }
+    const lanes = Array.from({ length: Math.min(concurrency, items.length) }, lane);
+    await Promise.all(lanes);
   }
 
   function saveCache() {
     try {
       const entries = Array.from(cache.entries())
         .filter(([, v]) => v && (v.tr || v.romaja))
-        .slice(-5000);
+        .slice(-6000);
       localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
     } catch (e) {}
   }
@@ -130,19 +165,7 @@
   function getCleanText(lineEl) {
     const clone = lineEl.cloneNode(true);
     clone.querySelectorAll('.spicy-tr-box').forEach(el => el.remove());
-    let container = clone;
-    while (container.children.length === 1 && container.children[0].children.length > 0) {
-      container = container.children[0];
-    }
-    if (container.children.length > 1) {
-      const words = [];
-      Array.from(container.childNodes).forEach(n => {
-        const txt = (n.textContent || '').trim();
-        if (txt) words.push(txt);
-      });
-      return words.join(' ').replace(/\s+/g, ' ').trim();
-    }
-    return clone.textContent.replace(/\s+/g, ' ').trim();
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
   async function fetchRomajaLine(rawText) {
@@ -254,7 +277,7 @@
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
     const inputLinesText = chunkLines.map(l => `- ${l}`).join('\n');
 
-    const prompt = `You are Turkey's ultimate, professional music translator, localizing song lyrics into natural, idiomatic Turkish.
+    const prompt = `You are Turkey's ultimate music translator localizing song lyrics into natural Turkish.
 Song: "${songTitle}" by "${artist}"
 
 CRITICAL RULES:
@@ -281,7 +304,7 @@ ${inputLinesText}`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 4096 }
+            generationConfig: { temperature: 0.2, maxOutputTokens: 4096 }
           })
         });
 
@@ -293,7 +316,7 @@ ${inputLinesText}`;
         const json = await res.json();
         const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         const parsed = parseAnchoredAiOutput(rawOutput);
-        
+
         if (parsed.length === 0) throw new Error('Empty AI response');
 
         const normToRaw = new Map(chunkLines.map(l => [normalize(l), l]));
@@ -326,69 +349,102 @@ ${inputLinesText}`;
     throw lastError;
   }
 
+  // PATCHED: no more silent fallback to `trLine = rawText` (that's what was poisoning
+  // the cache and permanently killing lines). A genuine failure now marks the line
+  // for retry instead. Per-line requests are now lightly throttled instead of firing
+  // in one unthrottled burst.
   async function translateWithGTX(linesToTranslate) {
     const joinedBlock = linesToTranslate.join('.\n');
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joinedBlock)}`;
-    
+
     let splitLines = [];
+    let batchOk = false;
     try {
       const res = await fetch(url);
-      const json = await res.json();
-      const fullText = (json.sentences || []).map(s => s.trans || '').join('');
-      splitLines = fullText.split('\n').map(s => s.replace(/\.$/, '').trim());
-    } catch (e) {}
+      if (res.ok) {
+        const json = await res.json();
+        const fullText = (json.sentences || []).map(s => s.trans || '').join('');
+        splitLines = fullText.split('\n').map(s => s.replace(/\.$/, '').trim());
+        batchOk = true;
+      } else {
+        warn('GTX batch HTTP', res.status);
+      }
+    } catch (e) {
+      err('GTX batch fetch failed:', e.message || e);
+    }
 
-    await Promise.all(
-      linesToTranslate.map(async (rawText, idx) => {
-        let trLine = splitLines[idx] || rawText;
-        const romaja = await fetchRomajaLine(rawText);
+    if (!batchOk) {
+      // Don't amplify a single failure into N parallel per-line requests - just
+      // cool these lines down and let the next scan cycle retry them.
+      linesToTranslate.forEach(t => markFailed(t));
+      return;
+    }
+
+    await runThrottled(linesToTranslate, async (rawText, idx) => {
+      let trLine = splitLines[idx] || '';
+      let romaja = isNonLatin(rawText) ? await fetchRomajaLine(rawText) : '';
+
+      if (!trLine) {
+        try {
+          const singleUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&q=${encodeURIComponent(rawText)}`;
+          const r = await fetch(singleUrl);
+          if (r.ok) {
+            const j = await r.json();
+            if (Array.isArray(j[0])) {
+              trLine = j[0].map(p => p[0] || '').join('').trim();
+            }
+          }
+        } catch (e) {
+          err('GTX single-line fallback failed for', rawText, e.message || e);
+        }
+      }
+
+      if (trLine && normalize(trLine) !== normalize(rawText)) {
         cache.set(rawText, { tr: forcePerfectTurkish(trLine), romaja });
-      })
-    );
+      } else {
+        markFailed(rawText);
+      }
+    }, { concurrency: 2, spacingMs: 150 });
+
     saveCache();
     updateDOMWithCache();
   }
 
+  // PATCHED: chunk requests now go through a concurrency cap (4 at once) instead of
+  // an unlimited Promise.all, and missing-line selection now respects the failedUntil
+  // cooldown so a just-failed line doesn't get re-queued on the very next mutation tick.
   async function processQueue(allVisibleLines) {
     const now = Date.now();
-    const missing = allVisibleLines.filter(t => {
-      if (cache.has(t)) return false;
-      if ((failedUntil.get(t) || 0) > now) return false;
-      const flightTime = inFlight.get(t);
-      if (flightTime && (now - flightTime) < IN_FLIGHT_TIMEOUT_MS) return false;
-      return true;
-    });
-
+    const missing = allVisibleLines.filter(t =>
+      !cache.has(t) && !inFlight.has(t) && (failedUntil.get(t) || 0) <= now
+    );
     if (missing.length === 0) return;
 
-    missing.forEach(t => inFlight.set(t, now));
-    log('Kuyruk taranıyor & çevriliyor (V30 Aggressive):', missing.length, 'satır');
+    missing.forEach(t => inFlight.add(t));
 
     const chunks = [];
     for (let i = 0; i < missing.length; i += CHUNK_SIZE) {
       chunks.push(missing.slice(i, i + CHUNK_SIZE));
     }
 
-    try {
-      for (const chunk of chunks) {
+    await runThrottled(chunks, async (chunk) => {
+      try {
         let leftover = chunk;
         if (geminiApiKey && geminiApiKey.trim().length > 10) {
           try {
             leftover = await translateChunkWithGemini(chunk);
           } catch (e) {
-            warn('Gemini hatası, GTX yedek motoruna geçiliyor', e);
+            warn('Gemini chunk failed entirely, falling back to GTX:', e.message || e);
             leftover = chunk;
           }
         }
         if (leftover && leftover.length > 0) {
           await translateWithGTX(leftover);
         }
+      } finally {
+        chunk.forEach(t => inFlight.delete(t));
       }
-    } catch (e) {
-      err('Kuyruk hatası', e);
-    } finally {
-      missing.forEach(t => inFlight.delete(t));
-    }
+    }, { concurrency: 4, spacingMs: 80 });
   }
 
   function injectToggleButton() {
@@ -400,7 +456,7 @@ ${inputLinesText}`;
     const updateBtnVisual = () => {
       btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''}`.trim();
       btn.textContent = geminiApiKey ? 'AI' : 'TR';
-      btn.title = geminiApiKey ? 'God Mode V30 Aktif' : 'API Anahtarı Gir';
+      btn.title = geminiApiKey ? 'God Mode V33' : 'API Anahtarı Gir';
     };
     updateBtnVisual();
 
@@ -416,13 +472,13 @@ ${inputLinesText}`;
 
     btn.oncontextmenu = (e) => {
       e.preventDefault();
-      const input = prompt('🌟 Spicy Lyrics V30 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
+      const input = prompt('🌟 Spicy Lyrics V33 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
       if (input !== null) {
         geminiApiKey = input.trim();
         localStorage.setItem('spicy_tr_gemini_key', geminiApiKey);
         cache.clear();
-        inFlight.clear();
         failedUntil.clear();
+        inFlight.clear();
         localStorage.removeItem(STORAGE_CACHE_KEY);
         document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => b.remove());
         updateBtnVisual();
@@ -437,7 +493,6 @@ ${inputLinesText}`;
     const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
     const allVisibleTexts = [];
     let hasMissing = false;
-    const now = Date.now();
 
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
@@ -451,11 +506,8 @@ ${inputLinesText}`;
         if (!lineEl.querySelector('.spicy-tr-box')) {
           renderSubtitles(lineEl, cache.get(text), text);
         }
-      } else {
-        const flightTime = inFlight.get(text);
-        if (!flightTime || (now - flightTime) >= IN_FLIGHT_TIMEOUT_MS) {
-          hasMissing = true;
-        }
+      } else if (!inFlight.has(text) && (failedUntil.get(text) || 0) <= Date.now()) {
+        hasMissing = true;
       }
     });
 
@@ -463,28 +515,27 @@ ${inputLinesText}`;
       clearTimeout(batchTimer);
       batchTimer = setTimeout(() => {
         processQueue(allVisibleTexts);
-      }, 100);
+      }, 50);
     }
   }
 
   function triggerMultiStageScan() {
     scanLines();
-    setTimeout(scanLines, 200);
+    setTimeout(scanLines, 100);
+    setTimeout(scanLines, 300);
     setTimeout(scanLines, 600);
     setTimeout(scanLines, 1200);
-    setTimeout(scanLines, 2500);
   }
 
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
   window._spicyTrObserver = new MutationObserver(() => scanLines());
   window._spicyTrObserver.observe(document.body, { childList: true, subtree: true });
 
-  // Scroll yapıldıkça ekrana yeni giren satırları anında yakala
   window.addEventListener('scroll', () => scanLines(), true);
 
   if (Spicetify?.Player) {
     Spicetify.Player.addEventListener("songchange", () => {
-      setTimeout(triggerMultiStageScan, 150);
+      setTimeout(triggerMultiStageScan, 50);
     });
   }
 
