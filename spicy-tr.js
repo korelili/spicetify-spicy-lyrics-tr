@@ -1,6 +1,13 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 33.1.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability Patch)
+// VERSION: 33.2.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability + Seek Patch)
+// ADDED: seek detection. Nothing fired a rescan specifically when the user dragged
+// the seek bar to a new point in the song - it relied on the DOM mutation/scroll
+// listeners happening to catch whatever Spicy Lyrics did internally, which wasn't
+// reliable. Now Spicetify's own "onprogress" event (fires with the current position
+// in ms) is watched: if the reported position jumps by more than ~1.5s compared to
+// what normal playback progression would predict, that's a seek, and it immediately
+// forces a full rescan so translation starts right away for whatever's now relevant.
 // DESCRIPTION: Same as v33.0.0, with two targeted fixes for "delay + skipped lines":
 //   1) translateWithGTX used to fall back to `trLine = rawText` when no real
 //      translation came back, and still cache.set() that dud entry. Since the line
@@ -533,9 +540,37 @@ ${inputLinesText}`;
 
   window.addEventListener('scroll', () => scanLines(), true);
 
+  // Seek detection: compare each reported position against what normal playback
+  // would predict since the last report. A big mismatch means the user scrubbed to
+  // a new point - force a rescan immediately instead of waiting on DOM/scroll
+  // listeners to maybe notice.
+  let lastKnownPos = null;
+  let lastKnownPosAt = null;
+  const SEEK_JUMP_THRESHOLD_MS = 1500;
+
+  function handleProgress(posMs) {
+    if (typeof posMs !== 'number') return;
+    const now = Date.now();
+    if (lastKnownPos !== null && lastKnownPosAt !== null) {
+      const expected = lastKnownPos + (now - lastKnownPosAt);
+      const delta = Math.abs(posMs - expected);
+      if (delta > SEEK_JUMP_THRESHOLD_MS) {
+        log('seek detected (~' + Math.round(delta / 1000) + 's jump), forcing rescan');
+        triggerMultiStageScan();
+      }
+    }
+    lastKnownPos = posMs;
+    lastKnownPosAt = now;
+  }
+
   if (Spicetify?.Player) {
     Spicetify.Player.addEventListener("songchange", () => {
+      lastKnownPos = null;
+      lastKnownPosAt = null;
       setTimeout(triggerMultiStageScan, 50);
+    });
+    Spicetify.Player.addEventListener("onprogress", (event) => {
+      handleProgress(event?.data);
     });
   }
 
