@@ -1,13 +1,26 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 33.2.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability + Seek Patch)
-// ADDED: seek detection. Nothing fired a rescan specifically when the user dragged
-// the seek bar to a new point in the song - it relied on the DOM mutation/scroll
-// listeners happening to catch whatever Spicy Lyrics did internally, which wasn't
-// reliable. Now Spicetify's own "onprogress" event (fires with the current position
-// in ms) is watched: if the reported position jumps by more than ~1.5s compared to
-// what normal playback progression would predict, that's a seek, and it immediately
-// forces a full rescan so translation starts right away for whatever's now relevant.
+// VERSION: 33.3.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability + Seek + Crash Patch)
+// ADDED in 33.2: seek detection. Nothing fired a rescan specifically when the user
+// dragged the seek bar to a new point in the song - it relied on the DOM mutation/
+// scroll listeners happening to catch whatever Spicy Lyrics did internally, which
+// wasn't reliable. Now Spicetify's "onprogress" event (current position in ms) is
+// watched: a position jump of more than ~1.5s vs. normal playback progression means
+// a seek happened, and it immediately forces a full rescan.
+// ADDED in 33.3: fixed the actual cause of "translation just stops partway through
+// a normal, un-seeked session and never comes back". When EVERY Gemini model ends
+// up on cooldown at once (e.g. the free API key's quota got used up after a lot of
+// listening), the per-chunk translator's `lastError` was left as `null` (the loop
+// never entered a try/catch to set it), and then `throw lastError` threw `null`.
+// The caller did `e.message` on that `null` in its catch block, which itself threw
+// a brand new TypeError - BEFORE the code ever reached the GTX fallback call. So
+// once the Gemini key was exhausted, every future chunk silently crashed and never
+// even tried the free GTX engine as a backup: translation stopped dead for the rest
+// of the session, exactly as reported, independent of seeking. Fixed by always
+// throwing a real Error, handling it defensively either way, and - as a bonus -
+// added a global 2-minute "Gemini is down" gate so once this is detected, new
+// chunks skip straight to GTX instead of each one re-discovering the same outage,
+// and it clears itself the moment a Gemini call succeeds again.
 // DESCRIPTION: Same as v33.0.0, with two targeted fixes for "delay + skipped lines":
 //   1) translateWithGTX used to fall back to `trLine = rawText` when no real
 //      translation came back, and still cache.set() that dud entry. Since the line
@@ -53,6 +66,7 @@
   const failedUntil = new Map(); // rawText -> timestamp; don't retry before this
   const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
+  let geminiGloballyDownUntil = 0; // when ALL models failed at once, back off entirely for a bit
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
@@ -299,10 +313,12 @@ TR: <natural Turkish translation using informal 'sen'>
 Lines to translate:
 ${inputLinesText}`;
 
-    let lastError = null;
+    let lastError = new Error('Tüm Gemini modelleri şu an soğuma süresinde veya kullanılamıyor');
+    let anyModelAttempted = false;
 
     for (const model of GEMINI_MODELS) {
       if ((deadModels.get(model) || 0) > Date.now()) continue;
+      anyModelAttempted = true;
 
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey.trim()}`;
@@ -347,12 +363,26 @@ ${inputLinesText}`;
         saveCache();
         updateDOMWithCache();
 
+        geminiGloballyDownUntil = 0; // it just worked, so Gemini is clearly back
+
         const leftover = chunkLines.filter(l => !matched.has(l));
         return leftover;
-      } catch (err) {
-        lastError = err;
+      } catch (modelErr) {
+        lastError = modelErr;
       }
     }
+
+    // Every model was either on cooldown or just failed - no point hammering a
+    // dead/quota-exhausted key on every single chunk. Back off globally for a bit
+    // so new chunks go straight to the GTX fallback instead of each silently
+    // wasting a cycle (and, previously, crashing before reaching GTX at all).
+    if (!anyModelAttempted || GEMINI_MODELS.every(m => (deadModels.get(m) || 0) > Date.now())) {
+      if (geminiGloballyDownUntil <= Date.now()) {
+        warn('Tüm Gemini modelleri kullanılamıyor (kota/limit olabilir) - GTX motoruna geçiliyor, 2 dakika sonra Gemini tekrar denenecek');
+      }
+      geminiGloballyDownUntil = Date.now() + 120000;
+    }
+
     throw lastError;
   }
 
@@ -437,11 +467,12 @@ ${inputLinesText}`;
     await runThrottled(chunks, async (chunk) => {
       try {
         let leftover = chunk;
-        if (geminiApiKey && geminiApiKey.trim().length > 10) {
+        const geminiReady = geminiApiKey && geminiApiKey.trim().length > 10 && Date.now() >= geminiGloballyDownUntil;
+        if (geminiReady) {
           try {
             leftover = await translateChunkWithGemini(chunk);
           } catch (e) {
-            warn('Gemini chunk failed entirely, falling back to GTX:', e.message || e);
+            warn('Gemini chunk failed entirely, falling back to GTX:', (e && e.message) || e || 'unknown error');
             leftover = chunk;
           }
         }
