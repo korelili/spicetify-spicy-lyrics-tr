@@ -1,6 +1,19 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 33.3.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability + Seek + Crash Patch)
+// VERSION: 33.4.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability + Seek + Crash + Quality Patch)
+// ADDED in 33.4: fixed two embarrassing mistranslation bugs reported with real
+// screenshots. (1) forcePerfectTurkish had two generic regexes meant to turn formal
+// "-sınız/-niz" verb endings informal, but they also matched Turkish formal
+// IMPERATIVES (e.g. "uyanınız" = "wake up!") and mangled them into a still-wrong
+// informal command ("uyanın") instead of the narrative line the song needed.
+// Removed those regexes - the explicit prompt instruction plus the safe exact
+// whole-word replacements already handle this without risking broken grammar.
+// (2) When a line fell back to the GTX (Google Translate) engine - most often
+// because the Gemini key had hit its quota - common rap slang like "hoes"/"ho" was
+// coming back as literal nonsense ("ayakkabılar"/shoes, "domuz"/pig), a known GTX
+// quirk since it has no song context. A small slang-to-plain-English normalization
+// now runs ONLY on the text sent to GTX (never touches what Gemini sees, never
+// changes the cached/displayed original line) to avoid these specific failures.
 // ADDED in 33.2: seek detection. Nothing fired a rescan specifically when the user
 // dragged the seek bar to a new point in the song - it relied on the DOM mutation/
 // scroll listeners happening to catch whatever Spicy Lyrics did internally, which
@@ -223,8 +236,13 @@
          .replace(/\bBebek\b/gi, 'Bebeğim')
          .replace(/Rap boku/gi, 'Rap');
 
-    t = t.replace(/([a-zçğıöşü]+)n[iıuü]z\b/gi, '$1n')
-         .replace(/([a-zçğıöşü]+)s[iıuü]n[iıuü]z\b/gi, '$1sın');
+    // NOTE: there used to be two generic regexes here that stripped any "-nız/-niz"
+    // or "-sınız/-siniz" word ending to turn formal verbs informal. They were unsafe:
+    // Turkish formal IMPERATIVES (e.g. "uyanınız" = "wake up!") also end in "-ınız",
+    // and stripping that tail turned them into "uyanın" - still a (now informal)
+    // command, not the narrative line the song actually needed. Removed in favor of
+    // the prompt's explicit "always sen, never siz" instruction plus the safe,
+    // exact whole-word replacements above, which can't produce broken grammar.
 
     t = t.replace(/[.?]+$/, '');
     if (t.length > 0) t = t.charAt(0).toUpperCase() + t.slice(1);
@@ -386,12 +404,32 @@ ${inputLinesText}`;
     throw lastError;
   }
 
+  // GTX (Google Translate) has no song context and is known to badly mistranslate
+  // a handful of very common rap/hip-hop slang words when they appear with no
+  // surrounding context (e.g. "hoes" -> "shoes", "ho" -> literally "pig" in some
+  // cases) - a well-known Google Translate quirk, not something we can prompt our
+  // way out of since GTX isn't an LLM. Gemini already handles this correctly (it
+  // has context + explicit instructions), so this normalization ONLY applies to
+  // text sent to GTX, never to Gemini, and never changes what's cached/displayed
+  // as the "original" line - only what's sent to the translate API.
+  const GTX_SLANG_NORMALIZE = [
+    [/\bhoes\b/gi, 'women'],
+    [/\bhoe\b/gi, 'woman'],
+    [/\bho\b/gi, 'woman'],
+    [/\bthots?\b/gi, 'women']
+  ];
+  function normalizeForGTX(text) {
+    let t = text;
+    GTX_SLANG_NORMALIZE.forEach(([re, repl]) => { t = t.replace(re, repl); });
+    return t;
+  }
+
   // PATCHED: no more silent fallback to `trLine = rawText` (that's what was poisoning
   // the cache and permanently killing lines). A genuine failure now marks the line
   // for retry instead. Per-line requests are now lightly throttled instead of firing
   // in one unthrottled burst.
   async function translateWithGTX(linesToTranslate) {
-    const joinedBlock = linesToTranslate.join('.\n');
+    const joinedBlock = linesToTranslate.map(normalizeForGTX).join('.\n');
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joinedBlock)}`;
 
     let splitLines = [];
@@ -423,7 +461,7 @@ ${inputLinesText}`;
 
       if (!trLine) {
         try {
-          const singleUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&q=${encodeURIComponent(rawText)}`;
+          const singleUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&q=${encodeURIComponent(normalizeForGTX(rawText))}`;
           const r = await fetch(singleUrl);
           if (r.ok) {
             const j = await r.json();
