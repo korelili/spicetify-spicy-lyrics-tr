@@ -1,6 +1,24 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 33.4.0 (Instant Parallel Engine & Zero-Lag Anchor - Reliability + Seek + Crash + Quality Patch)
+// VERSION: 33.5.0 (Instant Parallel Engine & Zero-Lag Anchor - Translation Quality Patch)
+// ADDED in 33.5: fixed several concrete mistranslation patterns confirmed with real
+// screenshots across EXO/GOT7/JAY B/BamBam lyrics: (1) formal "siz" still leaking
+// through in both Gemini and GTX output ("gevşetin", "Kalbinize", "düğmelerinizi",
+// "Siz farkına bile varmadan", etc.) - added safe case-suffix-based regex fixes
+// (only applied when a further case ending follows "-nİz-", which an imperative verb
+// can never take, so it's unambiguously a noun possessive) plus exact-phrase fixes
+// for the specific verbs observed, and gave the prompt concrete wrong/right examples
+// pulled straight from the real output. (2) stylized repeated ad-libs like
+// "On&on&on&on" being translated word-by-word into nonsense ("Açık&açık&açık") -
+// prompt now explicitly forbids literal per-token translation of repeated vocal
+// patterns. (3) lines that are already in English (like a song-title line) being
+// silently left untranslated - prompt now requires every line to get a real Turkish
+// translation regardless. (4) romanization for scripts like Thai coming back as
+// unreadable academic transliteration full of stacked diacritics - prompt now asks
+// for simple plain-Latin casual phonetic spelling only.
+// Note: this is prompt + safe post-processing, not a grammar engine - it
+// substantially reduces these patterns but can't mechanically guarantee zero
+// mistranslations from an LLM in every language/context.
 // ADDED in 33.4: fixed two embarrassing mistranslation bugs reported with real
 // screenshots. (1) forcePerfectTurkish had two generic regexes meant to turn formal
 // "-sınız/-niz" verb endings informal, but they also matched Turkish formal
@@ -236,13 +254,32 @@
          .replace(/\bBebek\b/gi, 'Bebeğim')
          .replace(/Rap boku/gi, 'Rap');
 
-    // NOTE: there used to be two generic regexes here that stripped any "-nız/-niz"
-    // or "-sınız/-siniz" word ending to turn formal verbs informal. They were unsafe:
-    // Turkish formal IMPERATIVES (e.g. "uyanınız" = "wake up!") also end in "-ınız",
-    // and stripping that tail turned them into "uyanın" - still a (now informal)
-    // command, not the narrative line the song actually needed. Removed in favor of
-    // the prompt's explicit "always sen, never siz" instruction plus the safe,
-    // exact whole-word replacements above, which can't produce broken grammar.
+    // Bare "Siz" as its own word (e.g. "Siz farkına bile varmadan") is unambiguous -
+    // always safe to informalize.
+    t = t.replace(/\bSiz\b/gi, 'Sen');
+
+    // Possessive/case-marked NOUNS with a formal "-nİz-" plus a FURTHER case ending
+    // (dative/accusative/locative) are safe to informalize: imperative VERBS never
+    // take a further case suffix (an imperative is already the final word form), so
+    // this shape can only be a noun possessive, e.g. "düğmelerinizi" -> "düğmelerini",
+    // "Kalbinize" -> "Kalbine". The bare "-nİz" ending with NOTHING after it is left
+    // alone on purpose (that's the ambiguous case that broke "uyanınız" before -
+    // could be a noun or an imperative, can't tell safely with a regex).
+    t = t.replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inize\b/g, '$1ine')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınıza\b/g, '$1ına')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüze\b/g, '$1üne')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuza\b/g, '$1una')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inizi\b/g, '$1ini')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınızı\b/g, '$1ını')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzü\b/g, '$1ünü')
+         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzu\b/g, '$1unu');
+
+    // A handful of exact formal phrases/words confirmed from real output (safe
+    // because they're literal whole-word/phrase matches, not a broad heuristic).
+    t = t.replace(/\bdevam edin\b/gi, 'devam et')
+         .replace(/\bgevşetin\b/gi, 'gevşet')
+         .replace(/\bkeşfedin\b/gi, 'keşfet')
+         .replace(/\bçevirin\b/gi, 'çevir');
 
     t = t.replace(/[.?]+$/, '');
     if (t.length > 0) t = t.charAt(0).toUpperCase() + t.slice(1);
@@ -320,12 +357,16 @@
 Song: "${songTitle}" by "${artist}"
 
 CRITICAL RULES:
-1. ALWAYS INFORMAL "SEN": ALWAYS use "sen", "vücudun", "bebeğim", "söyle", "biliyorsun". NEVER use "siz", "vücudunuz".
-2. NO LINE SKIP OR SHIFT: You MUST translate EVERY SINGLE line listed below. Do not omit any line.
-3. OUTPUT FORMAT: For EVERY line listed below, output exactly this format separated by ---:
+1. ALWAYS INFORMAL "SEN", NEVER FORMAL "SİZ" - no exceptions, in any language the source is in. This applies to every verb ending and every possessive, not just the pronoun itself.
+   WRONG (formal - never output anything like this): "Ters çevirin", "gevşetin", "keşfedin", "devam edin", "Kalbinize", "düğmelerinizi", "yerlerinizi", "Siz farkına bile varmadan", "görüş alanınızdadır"
+   RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır"
+2. NO LINE SKIP OR SHIFT: You MUST translate EVERY SINGLE line listed below into Turkish, with no exceptions - including lines that are already in English, already seem simple/understandable, or match the song's title. Never leave a line as-is just because it "already makes sense" - every line gets its own real Turkish translation.
+3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word (never turn "On&on&on&on" into something like "Açık&açık&açık" by translating "on" as the on/off switch word) - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
+4. ROMANIZATION STYLE: ROM must be SIMPLE, casual phonetic spelling using plain Latin letters only - the way an ordinary person would informally write out the pronunciation online. NEVER use academic/IPA-style transliteration with stacked diacritics, special symbols, or combining accent marks (this applies to every script, Thai included) - if you can't produce a clean plain-Latin phonetic version, write NONE instead of a symbol-heavy one.
+5. OUTPUT FORMAT: For EVERY line listed below, output exactly this format separated by ---:
 SRC: <exact original line>
-ROM: <accurate Latin romanization if non-Latin script, otherwise write NONE>
-TR: <natural Turkish translation using informal 'sen'>
+ROM: <simple plain-Latin phonetic romanization if non-Latin script, otherwise write NONE>
+TR: <natural Turkish translation using informal 'sen', per rule 1>
 ---
 
 Lines to translate:
