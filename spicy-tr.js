@@ -1,6 +1,11 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 33.5.0 (Instant Parallel Engine & Zero-Lag Anchor - Translation Quality Patch)
+// VERSION: 33.5.1 (Instant Parallel Engine & Zero-Lag Anchor - Translation Quality Patch)
+// FIXED a regression from 33.5: the romanization-style rule told the model to write
+// NONE when it couldn't produce a "clean" simple version, which it started doing
+// often for Thai specifically - causing romanization to vanish inconsistently
+// (present on one Thai song, missing on another). Romanization for non-Latin script
+// is now mandatory with no escape hatch; only its STYLE is constrained.
 // ADDED in 33.5: fixed several concrete mistranslation patterns confirmed with real
 // screenshots across EXO/GOT7/JAY B/BamBam lyrics: (1) formal "siz" still leaking
 // through in both Gemini and GTX output ("gevşetin", "Kalbinize", "düğmelerinizi",
@@ -362,7 +367,8 @@ CRITICAL RULES:
    RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır"
 2. NO LINE SKIP OR SHIFT: You MUST translate EVERY SINGLE line listed below into Turkish, with no exceptions - including lines that are already in English, already seem simple/understandable, or match the song's title. Never leave a line as-is just because it "already makes sense" - every line gets its own real Turkish translation.
 3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word (never turn "On&on&on&on" into something like "Açık&açık&açık" by translating "on" as the on/off switch word) - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
-4. ROMANIZATION STYLE: ROM must be SIMPLE, casual phonetic spelling using plain Latin letters only - the way an ordinary person would informally write out the pronunciation online. NEVER use academic/IPA-style transliteration with stacked diacritics, special symbols, or combining accent marks (this applies to every script, Thai included) - if you can't produce a clean plain-Latin phonetic version, write NONE instead of a symbol-heavy one.
+4. ROMANIZATION IS MANDATORY for every line not already in Latin script - NEVER write NONE for Korean, Japanese, Chinese, Thai, or any other non-Latin script, even when a perfectly clean version is hard to produce. Always give your best simple phonetic attempt instead of skipping it - an imperfect romanization is always better than none. (Only write NONE when the line is ALREADY in Latin script, e.g. English/Turkish - never as a way to avoid a hard case.)
+   STYLE: keep it casual and readable, the way an ordinary person types out pronunciation online. Standard single accent marks from an established system are fine (e.g. Chinese Hanyu Pinyin tone marks like ā/í/ǒ/ù). AVOID heavy academic/IAST-style transliteration with multiple stacked diacritics per letter (underdots, combined circumflex+macron, breve+dot stacks, etc.) - this has specifically been a problem for Thai; simplify those down to plain, easy-to-read Latin spelling instead of a technically "precise" but unreadable version.
 5. OUTPUT FORMAT: For EVERY line listed below, output exactly this format separated by ---:
 SRC: <exact original line>
 ROM: <simple plain-Latin phonetic romanization if non-Latin script, otherwise write NONE>
