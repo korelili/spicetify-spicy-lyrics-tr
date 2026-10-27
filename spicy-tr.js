@@ -1,11 +1,19 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 33.5.1 (Instant Parallel Engine & Zero-Lag Anchor - Translation Quality Patch)
-// FIXED a regression from 33.5: the romanization-style rule told the model to write
-// NONE when it couldn't produce a "clean" simple version, which it started doing
-// often for Thai specifically - causing romanization to vanish inconsistently
-// (present on one Thai song, missing on another). Romanization for non-Latin script
-// is now mandatory with no escape hatch; only its STYLE is constrained.
+// VERSION: 33.6.0 (Instant Parallel Engine & Zero-Lag Anchor - Translation Quality + GTX Backoff Patch)
+// 33.5.1 FIX: the romanization-style rule told the model to write NONE when it
+// couldn't produce a "clean" simple version, which it started doing often for Thai
+// specifically - causing romanization to vanish inconsistently (present on one Thai
+// song, missing on another). Romanization for non-Latin script is now mandatory
+// with no escape hatch; only its STYLE is constrained.
+// 33.6.0 ADDED: a GTX backoff gate mirroring the existing Gemini one. After many
+// songs in one sitting, translation was reported to stop completely with no
+// recovery - the Gemini key's quota being exhausted (already handled by the earlier
+// crash fix + Gemini backoff gate) was only half the picture: GTX itself also gets
+// rate-limited under sustained heavy use, and with no backoff of its own, every new
+// chunk kept re-triggering the same block instead of giving it time to clear. GTX
+// now backs off for 3 minutes after 3 consecutive failures, then retries
+// automatically, instead of hammering a blocked endpoint indefinitely.
 // ADDED in 33.5: fixed several concrete mistranslation patterns confirmed with real
 // screenshots across EXO/GOT7/JAY B/BamBam lyrics: (1) formal "siz" still leaking
 // through in both Gemini and GTX output ("gevşetin", "Kalbinize", "düğmelerinizi",
@@ -103,6 +111,8 @@
   const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
   let geminiGloballyDownUntil = 0; // when ALL models failed at once, back off entirely for a bit
+  let gtxGloballyDownUntil = 0; // same idea for the GTX engine when it's being rate-limited
+  let gtxConsecutiveFailures = 0;
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
@@ -476,6 +486,14 @@ ${inputLinesText}`;
   // for retry instead. Per-line requests are now lightly throttled instead of firing
   // in one unthrottled burst.
   async function translateWithGTX(linesToTranslate) {
+    if (Date.now() < gtxGloballyDownUntil) {
+      // GTX has failed repeatedly in a row recently (sustained rate-limiting) -
+      // don't keep re-triggering the same block, just cool these lines down and
+      // let them retry once the backoff window passes.
+      linesToTranslate.forEach(t => markFailed(t));
+      return;
+    }
+
     const joinedBlock = linesToTranslate.map(normalizeForGTX).join('.\n');
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dj=1&q=${encodeURIComponent(joinedBlock)}`;
 
@@ -496,11 +514,18 @@ ${inputLinesText}`;
     }
 
     if (!batchOk) {
+      gtxConsecutiveFailures++;
+      if (gtxConsecutiveFailures >= 3 && gtxGloballyDownUntil <= Date.now()) {
+        warn('GTX tekrar tekrar başarısız oluyor (muhtemelen rate-limit) - 3 dakikalığına devre dışı bırakılıyor, sonra otomatik tekrar denenecek');
+        gtxGloballyDownUntil = Date.now() + 180000;
+      }
       // Don't amplify a single failure into N parallel per-line requests - just
       // cool these lines down and let the next scan cycle retry them.
       linesToTranslate.forEach(t => markFailed(t));
       return;
     }
+    gtxConsecutiveFailures = 0;
+    gtxGloballyDownUntil = 0;
 
     await runThrottled(linesToTranslate, async (rawText, idx) => {
       let trLine = splitLines[idx] || '';
