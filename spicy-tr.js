@@ -1,6 +1,28 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 34.1.0 (Whole-Song Context Engine + Reliable GTX Fallback)
+// VERSION: 34.2.0 (Whole-Song Context Engine + Reliable GTX Fallback)
+//
+// 34.2 FIX: screenshots still showed ~half the lines of a fully-English song
+// (Fallin', Python) permanently blank. Traced it to this: once GTX enters
+// its own global backoff (which, after sustained heavy multi-song testing,
+// it will), every failed line was still only getting the normal 12s local
+// cooldown - so scanLines() kept "retrying" every 12s, immediately hitting
+// the still-active multi-minute GTX block again, over and over, for the
+// entire 30s-8min backoff window. Net effect: looked identical to "will
+// never come back" for the length of a typical song. Fixed by aligning a
+// line's local cooldown to the real remaining GTX backoff (capped at 60s)
+// instead of always 12s. Also: the toggle button now reflects GTX's own
+// down state too (not just Gemini's), with a combined "!!" state and a
+// countdown tooltip when BOTH engines are temporarily out, so an outage is
+// visible instead of indistinguishable from silent breakage.
+// HONESTY NOTE, important if distributing this: this ceiling is Google's
+// quota/rate-limit on a personal free API key + an unofficial endpoint, not
+// a code bug - no patch manufactures more free requests. Each end user
+// supplying their OWN Gemini key gets their own fresh daily quota, so a
+// typical listener's day-to-day experience should hold up far better than
+// what shows up during one dev session of rapidly switching through dozens
+// of songs back to back for testing. For guaranteed reliability at scale,
+// the real fix is a paid Gemini tier, not more client-side patching.
 //
 // 34.1 ADDED, from real screenshot evidence of V33 output:
 //  - "Lines that never show a translation even though they WERE translated":
@@ -148,8 +170,8 @@
   const MAX_LINES_PER_GEMINI_CALL = 50;
   const GEMINI_MAX_OUTPUT_TOKENS = 8192;
 
-  function markFailed(text) {
-    failedUntil.set(text, Date.now() + FAILURE_COOLDOWN_MS);
+  function markFailed(text, cooldownMs) {
+    failedUntil.set(text, Date.now() + (cooldownMs || FAILURE_COOLDOWN_MS));
   }
 
   function saveCache() {
@@ -591,7 +613,14 @@ TR: <natural Turkish translation using informal 'sen', per rule 1>
   // "present on one Thai song, missing on another" inconsistency.
   async function translateWithGTXPerLine(linesToTranslate) {
     if (Date.now() < gtxGloballyDownUntil) {
-      linesToTranslate.forEach(t => markFailed(t));
+      // Don't use the normal short 12s cooldown here - that made it look
+      // like translation was "about to retry any second" when it was
+      // actually stuck behind a multi-minute global backoff, burning scan
+      // cycles for nothing the whole time. Align the local cooldown to the
+      // real remaining wait (capped at 60s so we still periodically recheck
+      // rather than sleeping through the full 8-minute worst case).
+      const remaining = Math.min(gtxGloballyDownUntil - Date.now(), 60000);
+      linesToTranslate.forEach(t => markFailed(t, remaining));
       return;
     }
 
@@ -685,12 +714,28 @@ TR: <natural Turkish translation using informal 'sen', per rule 1>
   }
 
   function refreshToggleButtonVisual(btn) {
-    const geminiDown = !!geminiApiKey && Date.now() < geminiGloballyDownUntil;
-    btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''} ${geminiDown ? 'quota-warn' : ''}`.trim();
-    btn.textContent = geminiApiKey ? (geminiDown ? 'AI!' : 'AI') : 'TR';
-    btn.title = geminiApiKey
-      ? (geminiDown ? 'Gemini kotası şu anda dolu - geçici olarak sadece ücretsiz Google Translate kullanılıyor' : 'God Mode V34 (sağ tık: API anahtarını değiştir)')
-      : 'Sağ tık: Gemini API anahtarı gir (isteğe bağlı, daha iyi çeviri için)';
+    const now = Date.now();
+    const geminiDown = !!geminiApiKey && now < geminiGloballyDownUntil;
+    const gtxDown = now < gtxGloballyDownUntil;
+    const bothDown = geminiDown && gtxDown;
+    const anyWarn = geminiDown || gtxDown;
+
+    btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''} ${anyWarn ? 'quota-warn' : ''}`.trim();
+    btn.textContent = bothDown ? '!!' : (geminiApiKey ? (anyWarn ? 'AI!' : 'AI') : (gtxDown ? 'TR!' : 'TR'));
+
+    if (bothDown) {
+      const waitSec = Math.max(0, Math.round((Math.max(geminiGloballyDownUntil, gtxGloballyDownUntil) - now) / 1000));
+      btn.title = `Hem Gemini hem Google Translate şu anda geçici olarak kullanılamıyor (muhtemelen rate-limit) - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
+    } else if (gtxDown) {
+      const waitSec = Math.max(0, Math.round((gtxGloballyDownUntil - now) / 1000));
+      btn.title = `Ücretsiz Google Translate motoru şu anda geçici olarak kullanılamıyor (rate-limit) - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
+    } else if (geminiDown) {
+      btn.title = 'Gemini kotası şu anda dolu - geçici olarak sadece ücretsiz Google Translate kullanılıyor';
+    } else {
+      btn.title = geminiApiKey
+        ? 'God Mode V34 (sağ tık: API anahtarını değiştir)'
+        : 'Sağ tık: Gemini API anahtarı gir (isteğe bağlı, daha iyi çeviri için)';
+    }
   }
 
   function injectToggleButton() {
