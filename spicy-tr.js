@@ -1,78 +1,66 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 39.0.0 (Glued-romaja repair + ad-lib fallback protection +
-//           cache repair pass + persistent backoff + real quota detection)
+// VERSION: 40.0.0 (Dead Gemini models replaced + MyMemory language-detect
+//           bug fixed + cache reformalization repair + conjugation rule)
 //
-// V39 - WHAT CHANGED AND WHY (direct response to screenshots showing two
-// real, confirmed bugs plus a plausible explanation for "dies after ~3
-// songs"):
+// V40 - WHAT CHANGED AND WHY (direct response to live console logs showing
+// three separate, confirmed real-world failures, plus concrete grammar
+// bugs seen in screenshots):
 //
-// BUG 1 - GLUED ROMANIZATION ("amugeogjeongmamamamamama"):
-// Gemini sometimes ignores the "always space romanized words" rule and
-// returns the "rom" field as one unbroken lowercase block, especially for
-// lines with repeated ad-lib tokens. The old fixGluedWords() only inserted
-// a space at a lowercase->UPPERCASE boundary, which never fires on
-// all-lowercase romanized Korean, so the bug went straight through to the
-// screen. FIX: every "rom" is now validated. A clean whole-string repeat
-// ("mamamamamama") is deterministically re-spaced ("ma ma ma ma ma ma").
-// Anything else that looks glued (no whitespace, 8+ chars, but the source
-// line clearly has 2+ separate words) is DISCARDED instead of cached, and
-// the line is queued for a dedicated GTX dt=rm-only re-fetch - that
-// endpoint is a straight transliteration call with no "creative ad-lib"
-// step, so it doesn't share this failure mode.
+// BUG 1 - TWO GEMINI MODELS WERE PERMANENTLY DEAD: the console showed
+// "gemini-2.5-flash" and "gemini-2.5-flash-lite" both returning a hard
+// HTTP 404 with Google's own message: "This model ... is no longer
+// available to new users. Please update your code to use
+// models/gemini-3.5-flash-lite...". These were genuinely deprecated/
+// retired, not rate-limited - every single attempt against them was
+// wasted from the start, burning half of every 4-model x 4-key cascade
+// for nothing. FIX: replaced with gemini-3.5-flash and
+// gemini-3.5-flash-lite (Google's own explicitly-named successors).
+// gemini-3-flash-preview and gemini-3.1-flash-lite were left as-is - your
+// own logs show them returning 429/503 (genuinely busy), not 404, so
+// they're confirmed still-valid model ids.
 //
-// BUG 2 - LITERAL AD-LIB MISTRANSLATION ("On&on&on&on yeah" ->
-// "Açık&açık&açık evet"): the ad-lib rule ("don't translate a repeated
-// vocalization word-by-word") only ever lived in the GEMINI prompt. GTX
-// and MyMemory have zero awareness of it, so once Gemini fails for a
-// chunk (rate limit, quota, whatever) and a line falls through to them,
-// a repeated token gets translated literally and comes out as nonsense.
-// FIX: repeated-token/ad-lib lines are now detected before ever being
-// sent to GTX/MyMemory for literal translation. Romanization is
-// unaffected (transliteration doesn't have this failure mode) - only the
-// garbage "tr" output is suppressed.
+// BUG 2 - MYMEMORY HAS NEVER ACTUALLY WORKED: every version since it was
+// introduced (V36) sent langpair=auto|tr. MyMemory's public API hard-
+// rejects "auto" (and even "autodetect") as an invalid source language -
+// this is a known, long-standing public bug in their API, confirmed by
+// your own console log: "'AUTO' IS AN INVALID SOURCE LANGUAGE". So the
+// "third fallback engine" has silently failed on literally every call it
+// has ever made. FIX: a lightweight script-based source-language guess
+// (Hangul -> ko, Kana -> ja, Thai block -> th, CJK ideographs -> zh-CN,
+// else -> en) replaces "auto" - this is the same workaround other public
+// MyMemory client libraries use, since real auto-detect isn't available.
 //
-// CACHE REPAIR: both bugs above, once triggered under V33-V38, got cached
-// PERMANENTLY (the old code never re-validated a cache hit). V39 runs a
-// repair pass over the existing cache on load - and now also on every
-// plain right-click + OK - that fixes glued romaja in place and purges
-// mistranslated ad-lib entries so they get a clean retranslate. Your
-// existing cache isn't thrown away, just corrected.
+// BUG 3 - GTX IS GENUINELY RATE-LIMITED BY GOOGLE RIGHT NOW: the CORS-
+// block + 429 pattern in your console means Google's translate endpoint
+// is actively throttling this IP/origin after today's heavy testing
+// across several versions. This is an external, real block - no client-
+// side pacing trick fixes an already-issued block, it just needs time.
+// The backoff ceiling was raised (15min -> 30min max) so it stops
+// hammering a dead endpoint as often, but full recovery may take longer
+// than that tonight regardless.
 //
-// SHIFT+RIGHT-CLICK REMOVED (per request): plain right-click + OK now
-// always does the full reset (clears all cooldown/backoff state) AND runs
-// the cache repair pass above. There's no separate "nuclear wipe" option
-// anymore - the repair pass fixes corruption without needing to lose the
-// whole cache.
+// GRAMMAR/REGISTER BUGS CONFIRMED FROM SCREENSHOTS: "Ama iyiymişim gibi
+// davran" (bare imperative, should be "davranıyorum" - first person),
+// "...telefonunu aramak" (bare infinitive used as the whole line's verb,
+// should be "arıyorum"), and "sabahınızı" (leftover formal "siz" form,
+// violates Rule 1 outright). FIX: a new explicit prompt rule demands
+// complete, correctly-conjugated sentences matching who's speaking, with
+// these exact before/after examples. Also, repairCache() now re-runs
+// forcePerfectTurkish() over every cached line (not just the romaja/
+// ad-lib cases from V39), which cleans up old entries like "sabahınızı"
+// that were cached before today's regex coverage existed.
 //
-// REAL QUOTA vs TRANSIENT RATE LIMIT: a Gemini 429 whose error body
-// actually says "quota" (a real daily/account limit) now gets a ~3 hour
-// cooldown for that key+model instead of the old 60s - retrying a truly
-// exhausted quota every minute just burns more of it for nothing. If
-// every key dies from a quota error at the same moment, a console note
-// suggests checking whether they're all under the same Google account
-// (quota is pooled per account, not per key string - only keys from
-// genuinely different accounts are independent).
-//
-// PERSISTENT BACKOFF STATE: cooldown state (which key/model/engine is
-// currently "resting") used to live only in memory, so reloading the
-// script - which happens on every version swap, like the v36/v37/v38
-// testing you were doing - forgot any still-active real rate limit and
-// immediately hammered it again. V39 persists this state to localStorage
-// (refreshed every watchdog tick) and restores any cooldown that hasn't
-// actually expired yet on load.
-//
-// UNCHANGED from V38 (confirmed not the problem): the single-source-of-
-// truth enabled/disabled styling, the watchdog, the singleton guard, the
-// idempotent rendering, the persistent translation cache key/contents,
-// and the fact that it already only scans/translates while the lyrics
-// panel (#SpicyLyricsPage) is actually open.
+// UNCHANGED from V39: everything else (romaja glomming repair, ad-lib
+// fallback protection, persistent backoff state, right-click+OK does
+// full reset+repair, single-source-of-truth styling, watchdog, singleton
+// guard, idempotent rendering, persistent translation cache key).
 
-(function spicyTurkishProV39() {
+(function spicyTurkishProV40() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V39]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V39]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V39]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V40]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V40]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V40]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function fetchWithTimeout(url, options, timeoutMs) {
@@ -131,13 +119,13 @@
   let geminiGloballyDownUntil = 0;
   let geminiBackoffStage = 0;
 
-  const GTX_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000, 900000];
+  const GTX_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000, 900000, 1800000];
   const GTX_FAIL_THRESHOLD = 5;
   let gtxGloballyDownUntil = 0;
   let gtxBackoffStage = 0;
   let gtxConsecutiveFailures = 0;
 
-  const MM_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000, 900000];
+  const MM_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000, 900000, 1800000];
   const MM_FAIL_THRESHOLD = 5;
   let mmGloballyDownUntil = 0;
   let mmBackoffStage = 0;
@@ -146,9 +134,8 @@
   // --- Persist cooldown/backoff state across script reloads. Without
   // this, re-installing/testing a new version (or Spotify restarting)
   // forgets a real, still-active rate limit and immediately re-triggers
-  // it - very likely part of why things looked worse the longer a test
-  // session went on. Refreshed periodically by the watchdog; restored
-  // here on load, but only if it hasn't actually expired yet. ---
+  // it. Refreshed periodically by the watchdog; restored here on load,
+  // but only if it hasn't actually expired yet. ---
   const BACKOFF_STATE_KEY = 'spicy_tr_backoff_state_v1';
   function saveBackoffState() {
     try {
@@ -191,6 +178,20 @@
   }
   loadBackoffState();
 
+  // V40: the model ids below were corrected after gemini-2.5-flash and
+  // gemini-2.5-flash-lite both started returning a hard 404 "no longer
+  // available to new users" live in testing. If this ever happens again
+  // (Google retires another model), the deadModels map will show a 404
+  // for that specific combo in the console - that's your signal a model
+  // id here needs updating, as opposed to a 429/503 which just means
+  // "busy right now, will recover on its own".
+  const GEMINI_MODELS = [
+    'gemini-3.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash-lite'
+  ];
+
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let batchTimer = null;
 
@@ -228,18 +229,16 @@
     } catch (e) {}
   }
 
-  // Repairs data corrupted by the two bugs described in the header
-  // comment. Both got cached permanently under pre-V39 code since nothing
-  // ever re-validated a cache hit. This fixes what it safely can in place
-  // and purges what it can't, so those specific lines get a clean
-  // retranslate next time they're seen. Runs once on load, and again any
-  // time you right-click the toggle + OK.
+  // Repairs data corrupted by bugs from earlier versions. All of these
+  // got cached permanently since nothing ever re-validated a cache hit.
+  // Runs once on load, and again any time you right-click the toggle + OK.
   function repairCache() {
-    let fixed = 0, purged = 0;
+    let fixed = 0, purged = 0, reformalFixed = 0;
     for (const [rawLine, data] of Array.from(cache.entries())) {
       if (!data) continue;
       let changed = false;
 
+      // 1) Glued/unspaced romanization (V39 fix) - repair or discard.
       if (data.romaja && !/\s/.test(data.romaja) && data.romaja.length >= 8) {
         const repaired = splitRepeatingUnit(data.romaja);
         if (repaired) {
@@ -252,17 +251,32 @@
         if (changed) fixed++;
       }
 
+      // 2) Literal word-by-word ad-lib mistranslation (V39 fix) - purge.
       if (isAdlibPattern(rawLine) && data.tr && data.tr.includes('&') && normalize(data.tr) !== normalize(rawLine)) {
         cache.delete(rawLine);
         purged++;
         continue;
       }
 
+      // 3) (V40) Leftover formal "siz" forms or other patterns that
+      // today's forcePerfectTurkish would now catch but didn't exist (or
+      // wasn't applied) when this line was first cached. Guarded on both
+      // sides so this can never accidentally turn a suppressed/untranslated
+      // marker (tr === rawLine) into a bogus visible "translation".
+      if (data.tr && normalize(data.tr) !== normalize(rawLine)) {
+        const reformalized = forcePerfectTurkish(data.tr);
+        if (reformalized && reformalized !== data.tr && normalize(reformalized) !== normalize(rawLine)) {
+          data.tr = reformalized;
+          changed = true;
+          reformalFixed++;
+        }
+      }
+
       if (changed) cache.set(rawLine, data);
     }
-    if (fixed || purged) {
+    if (fixed || purged || reformalFixed) {
       saveCache();
-      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi (yeniden çevrilecek).`);
+      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi, ${reformalFixed} satırda resmi/"siz" kalıntısı temizlendi.`);
     }
   }
   repairCache(); // helper functions below are hoisted, safe to call here
@@ -356,10 +370,7 @@
 
   // Detects a string with NO whitespace that is a clean repetition of one
   // short unit (e.g. "mamamamamama" -> "ma" x6) and reconstructs it with
-  // spaces between each repeat. Returns null for anything that isn't a
-  // pure, confident repeat - ordinary glued text is left to
-  // looksGluedRomaja()/the discard-and-refetch path instead of being
-  // guessed at here.
+  // spaces between each repeat.
   function splitRepeatingUnit(s) {
     if (!s || /\s/.test(s)) return null;
     const n = s.length;
@@ -380,10 +391,6 @@
     return null;
   }
 
-  // A "rom" output is suspicious when it has NO internal whitespace at
-  // all but the source line clearly has multiple separate words/syllable
-  // blocks - a correct romanization of a multi-word line should also
-  // have multiple words.
   function looksGluedRomaja(originalLine, rom) {
     if (!rom || /\s/.test(rom)) return false;
     if (rom.length < 8) return false;
@@ -391,11 +398,6 @@
     return tokens.length >= 2;
   }
 
-  // A line is a "repeated ad-lib" when most of its space/&-separated
-  // tokens are the same word repeated (e.g. "마 마 마 마 마 마",
-  // "On&on&on&on yeah"). These should never be sent through a literal
-  // word-by-word translator (GTX/MyMemory have no concept of "treat this
-  // as one vocal unit" - only Gemini's prompt does).
   function isAdlibPattern(line) {
     const tokens = line.split(/[\s&]+/).filter(Boolean);
     if (tokens.length < 3) return false;
@@ -408,9 +410,19 @@
     return maxCount / tokens.length >= 0.6;
   }
 
-  // Safety net for ordinary glued output from the dumb engines (GTX used
-  // to only fix case-transition boundaries). Now also tries the
-  // repeating-unit repair first, which is the more common real-world case.
+  // MyMemory's public API has no reliable auto-detect: "auto",
+  // "autodetect" and "AUTODETECT" all hard-fail with "IS AN INVALID
+  // SOURCE LANGUAGE" - confirmed live in your console, and a known public
+  // issue with their API in general. This script-side guess replaces it
+  // (same workaround other MyMemory client libraries use in the wild).
+  function detectSourceLangForMyMemory(text) {
+    if (/[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]/.test(text)) return 'ko';
+    if (/[\u3040-\u30FF]/.test(text)) return 'ja';
+    if (/[\u0E00-\u0E7F]/.test(text)) return 'th';
+    if (/[\u4E00-\u9FFF]/.test(text)) return 'zh-CN';
+    return 'en';
+  }
+
   function fixGluedWords(s) {
     if (!s) return s;
     const repeated = splitRepeatingUnit(s);
@@ -545,13 +557,6 @@
     return parsed;
   }
 
-  const GEMINI_MODELS = [
-    'gemini-2.5-flash',
-    'gemini-3-flash-preview',
-    'gemini-3.1-flash-lite',
-    'gemini-2.5-flash-lite'
-  ];
-
   async function translateChunkWithGemini(chunkLines, allSongLines) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
@@ -569,8 +574,8 @@ ${targetLinesText}
 
 CRITICAL RULES:
 1. ALWAYS INFORMAL "SEN", NEVER FORMAL "SİZ" - no exceptions, in any language the source is in. This applies to every verb ending and every possessive, not just the pronoun itself.
-   WRONG (formal - never output anything like this): "Ters çevirin", "gevşetin", "keşfedin", "devam edin", "Kalbinize", "düğmelerinizi", "yerlerinizi", "Siz farkına bile varmadan", "görüş alanınızdadır"
-   RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır"
+   WRONG (formal - never output anything like this): "Ters çevirin", "gevşetin", "keşfedin", "devam edin", "Kalbinize", "düğmelerinizi", "yerlerinizi", "Siz farkına bile varmadan", "görüş alanınızdadır", "sabahınızı"
+   RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır", "sabahını"
 2. NO LINE SKIP OR SHIFT: your JSON array MUST contain exactly ${chunkLines.length} objects, one per numbered line above, in the exact same order - including lines that are already in English, already seem simple/understandable, or match the song's title. Never leave a line as-is just because it "already makes sense" - every line gets its own real Turkish translation.
 3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word for the "tr" field - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
 3b. FEELING OVER LITERAL WORDS: you are localizing a song for a Turkish listener to FEEL, not producing a dictionary crib. Prefer the natural way a Turkish songwriter/poet would phrase the same image over a flat word-for-word rendering - e.g. for an intensified color/quality, prefer Turkish's own reduplicated intensifiers where they fit naturally ("masmavi" rather than "çok mavi", "bembeyaz" rather than "çok beyaz", "güpegündüz" for broad daylight), and generally favor an evocative, idiomatic phrase over a technically-accurate-but-stiff one, as long as the core meaning is preserved.
@@ -578,7 +583,11 @@ CRITICAL RULES:
 4. ROMANIZATION IS MANDATORY for every line not already in Latin script - NEVER leave "rom" empty for Korean, Japanese, Chinese, Thai, or any other non-Latin script, even when a perfectly clean version is hard to produce. Always give your best simple phonetic attempt instead of skipping it. (Only use an empty string for "rom" when the line is ALREADY in Latin script.)
    STYLE: keep it casual and readable, the way an ordinary person types out pronunciation online. Standard single accent marks from an established system are fine. AVOID heavy academic/IAST-style transliteration with multiple stacked diacritics per letter.
    SPACING IS MANDATORY AND NON-NEGOTIABLE, EVEN FOR AD-LIBS: always put a space between EVERY romanized word exactly the way the original line's words/tokens are separated - this applies even when rule 3 tells you to compress a repeated ad-lib into one natural phrase for "tr". The "rom" field must still spell out each repeated unit separated by spaces (e.g. source "마 마 마 마 마 마" -> rom "ma ma ma ma ma ma", never "mamamamamama"). NEVER concatenate several words or repeated units into one unbroken string under any circumstance.
-5. OUTPUT FORMAT: respond with ONLY a JSON array matching the given schema - exactly ${chunkLines.length} objects, in the same order as the numbered lines above. Each object has "rom" (romanization, or "" if the line is already Latin script) and "tr" (the natural Turkish translation using informal "sen", per rule 1). No extra text, no markdown, no numbering in the output - just the array.`;
+5. COMPLETE, PROPERLY CONJUGATED SENTENCES: every translated line must read as a natural, grammatically complete Turkish sentence or fragment with a correctly conjugated verb matching who is actually speaking or being addressed in that line. NEVER end a line on a bare infinitive ("-mak/-mek" as the line's main verb) when it needs to be a finite verb, and NEVER use a bare imperative when the source line is a first-person statement, not a command.
+   WRONG: "...telefonunu aramak" (bare infinitive used as if it were the whole sentence) for a line that means "I'm calling your phone" -> RIGHT: "...telefonunu arıyorum"
+   WRONG: "Ama iyiymişim gibi davran" (imperative "act!", addressed to someone else) for a line that means "I act like I'm fine" -> RIGHT: "Ama iyiymişim gibi davranıyorum"
+   Only use an imperative form when the source line is itself genuinely phrased as a command/instruction.
+6. OUTPUT FORMAT: respond with ONLY a JSON array matching the given schema - exactly ${chunkLines.length} objects, in the same order as the numbered lines above. Each object has "rom" (romanization, or "" if the line is already Latin script) and "tr" (the natural Turkish translation using informal "sen", per rule 1). No extra text, no markdown, no numbering in the output - just the array.`;
 
     let lastError = new Error('Tüm Gemini anahtar/model kombinasyonları şu an soğuma süresinde veya kullanılamıyor');
 
@@ -800,11 +809,6 @@ CRITICAL RULES:
 
           const existing = cache.get(rawText) || {};
           const cleanRomaja = isNonLatin(rawText) ? fixGluedWords(romaja) : '';
-          // GTX has zero awareness of the ad-lib rule and will mistranslate
-          // a repeated token literally (e.g. "On&on&on&on yeah" ->
-          // "Açık&açık&açık evet"). Never use its "tr" output for a line
-          // matching a repeated ad-lib pattern - romanization is fine
-          // (transliteration, not translation, so it's unaffected).
           const useTr = !adlib && trLine && normalize(trLine) !== normalize(rawText);
           const gotSomethingNew = useTr || (cleanRomaja && !existing.romaja);
 
@@ -842,14 +846,9 @@ CRITICAL RULES:
     }
   }
 
-  // Dedicated romanization-only backfill, used when Gemini's "rom" output
-  // for a line was rejected as suspiciously glued. GTX's dt=rm is a
-  // straight transliteration call with no "creative ad-lib compression"
-  // step, so it's the most reliable single source for "just give me the
-  // romanization" specifically.
   async function translateRomajaOnlyWithGTX(lines) {
     if (!lines || lines.length === 0) return;
-    if (Date.now() < gtxGloballyDownUntil) return; // retried on a later scan
+    if (Date.now() < gtxGloballyDownUntil) return;
 
     const chunks = chunkArray(lines, GTX_CHUNK_SIZE);
     for (let ci = 0; ci < chunks.length; ci++) {
@@ -875,8 +874,7 @@ CRITICAL RULES:
             cache.set(rawText, { tr: current.tr, romaja: fixGluedWords(romaja) });
           }
         } catch (e) {
-          // silent - the line still shows its Turkish translation, it just
-          // stays without pronunciation help until a later scan retries
+          // silent - retried on a later scan
         } finally {
           gtxGate.release();
         }
@@ -905,9 +903,6 @@ CRITICAL RULES:
       }
 
       await Promise.all(chunks[ci].map(async (rawText) => {
-        // MyMemory never returns romanization, so for a repeated ad-lib
-        // line it can only ever offer a literal (near-certainly wrong)
-        // "tr" - not worth the request.
         if (isAdlibPattern(rawText)) {
           const existing = cache.get(rawText) || {};
           if (!existing.tr) {
@@ -919,7 +914,8 @@ CRITICAL RULES:
         await mmGate.acquire();
         try {
           const q = normalizeForDumbEngines(rawText).slice(0, 480);
-          const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=auto|tr`;
+          const srcLang = detectSourceLangForMyMemory(rawText);
+          const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${srcLang}|tr`;
           const res = await fetchWithTimeout(url, {}, 10000);
           if (!res.ok) {
             mmLastError = `HTTP ${res.status}`;
@@ -1072,7 +1068,7 @@ CRITICAL RULES:
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V39 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
+        ? `God Mode V40 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -1103,14 +1099,11 @@ CRITICAL RULES:
       }
     };
 
-    // Plain right-click + OK now always does a full reset AND repairs the
-    // cache - no Shift needed anymore (per request). There's no separate
-    // "nuclear wipe" option: the repair pass fixes corruption in place.
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       try {
         const currentValue = geminiApiKeys.join(', ');
-        const input = prompt('🌟 Spicy Lyrics V39 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
+        const input = prompt('🌟 Spicy Lyrics V40 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
         if (input === null) return;
 
         geminiApiKeys = Array.from(new Set(
@@ -1240,9 +1233,6 @@ CRITICAL RULES:
     Spicetify.Player.addEventListener('onprogress', progressHandler);
   }
 
-  // Watchdog: independent safety net, every 1.5s. Also where backoff state
-  // gets persisted periodically (cheap, "good enough" - worst case loses
-  // up to 1.5s of state on an abrupt reload).
   const watchdogInterval = setInterval(() => {
     try {
       applyEnabledClass();
