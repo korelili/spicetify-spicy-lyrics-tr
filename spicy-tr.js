@@ -1,66 +1,63 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 40.0.0 (Dead Gemini models replaced + MyMemory language-detect
-//           bug fixed + cache reformalization repair + conjugation rule)
+// VERSION: 41.0.0 (Killed the 3-hour "daily quota" exile - it was a false
+//           positive that was burning through all 4 keys x 4 models
+//           within a handful of songs)
 //
-// V40 - WHAT CHANGED AND WHY (direct response to live console logs showing
-// three separate, confirmed real-world failures, plus concrete grammar
-// bugs seen in screenshots):
+// V41 - WHAT CHANGED AND WHY (direct response to your own console logs,
+// which showed gemini-3.5-flash and gemini-3-flash-preview, across
+// several DIFFERENT key fingerprints, all getting flagged "Gerçek kota
+// hatası (daily quota) - 3 saat" within the same short test session):
 //
-// BUG 1 - TWO GEMINI MODELS WERE PERMANENTLY DEAD: the console showed
-// "gemini-2.5-flash" and "gemini-2.5-flash-lite" both returning a hard
-// HTTP 404 with Google's own message: "This model ... is no longer
-// available to new users. Please update your code to use
-// models/gemini-3.5-flash-lite...". These were genuinely deprecated/
-// retired, not rate-limited - every single attempt against them was
-// wasted from the start, burning half of every 4-model x 4-key cascade
-// for nothing. FIX: replaced with gemini-3.5-flash and
-// gemini-3.5-flash-lite (Google's own explicitly-named successors).
-// gemini-3-flash-preview and gemini-3.1-flash-lite were left as-is - your
-// own logs show them returning 429/503 (genuinely busy), not 404, so
-// they're confirmed still-valid model ids.
+// ROOT CAUSE: Google's Gemini API returns HTTP 429 for TWO completely
+// different situations, and BOTH put the word "quota" in the error text:
+//   (a) a genuine 24-hour daily cap ("requests per day")
+//   (b) a 60-SECOND rolling rate limit ("requests per minute" / RPM) -
+//       this is the one free-tier keys hit constantly during normal,
+//       even light, back-to-back listening/testing - it clears on its
+//       own in under a minute.
+// V40's isRealQuotaError check only looked for the word "quota" in the
+// message, so it could not tell these apart - it was treating EVERY
+// ordinary per-minute rate limit as if it were a full-day ban, and
+// sidelining that key+model combo for 3 hours (MODEL_DEAD_QUOTA_MS).
+// With 4 keys x 4 models = 16 combos, a handful of quick API calls
+// during one short session was enough to get most or all 16 combos
+// wrongly marked dead for hours - which matches exactly what you saw:
+// plenty of unused daily quota sitting on those keys, but the script
+// itself had locked them all out of its own accord.
 //
-// BUG 2 - MYMEMORY HAS NEVER ACTUALLY WORKED: every version since it was
-// introduced (V36) sent langpair=auto|tr. MyMemory's public API hard-
-// rejects "auto" (and even "autodetect") as an invalid source language -
-// this is a known, long-standing public bug in their API, confirmed by
-// your own console log: "'AUTO' IS AN INVALID SOURCE LANGUAGE". So the
-// "third fallback engine" has silently failed on literally every call it
-// has ever made. FIX: a lightweight script-based source-language guess
-// (Hangul -> ko, Kana -> ja, Thai block -> th, CJK ideographs -> zh-CN,
-// else -> en) replaces "auto" - this is the same workaround other public
-// MyMemory client libraries use, since real auto-detect isn't available.
+// FIX: the special "3-hour quota exile" is gone entirely. EVERY non-404
+// Gemini failure (429 included, 5xx, timeouts, whatever) now gets the
+// SAME short cooldown (MODEL_DEAD_SHORT_MS, 45s) as any other transient
+// hiccup. In practice this means your 4 keys just keep rotating through
+// each other continuously - if one combo fails, the very same request
+// already moves on to the next key/model within that same call, and the
+// failed combo is fair game again in well under a minute instead of 3
+// hours. This is much closer to how your old single-key V33 behaved (it
+// never blacklisted anything for more than a few seconds), just now
+// spread across 4 keys x 4 models instead of 1.
 //
-// BUG 3 - GTX IS GENUINELY RATE-LIMITED BY GOOGLE RIGHT NOW: the CORS-
-// block + 429 pattern in your console means Google's translate endpoint
-// is actively throttling this IP/origin after today's heavy testing
-// across several versions. This is an external, real block - no client-
-// side pacing trick fixes an already-issued block, it just needs time.
-// The backoff ceiling was raised (15min -> 30min max) so it stops
-// hammering a dead endpoint as often, but full recovery may take longer
-// than that tonight regardless.
+// The ONLY failure that still gets a long cooldown is a genuine HTTP 404
+// (MODEL_DEAD_LONG_MS, 6h) - that means the model id itself was retired
+// by Google, which no amount of retrying fixes, unlike a 429 which is
+// always temporary by definition.
 //
-// GRAMMAR/REGISTER BUGS CONFIRMED FROM SCREENSHOTS: "Ama iyiymişim gibi
-// davran" (bare imperative, should be "davranıyorum" - first person),
-// "...telefonunu aramak" (bare infinitive used as the whole line's verb,
-// should be "arıyorum"), and "sabahınızı" (leftover formal "siz" form,
-// violates Rule 1 outright). FIX: a new explicit prompt rule demands
-// complete, correctly-conjugated sentences matching who's speaking, with
-// these exact before/after examples. Also, repairCache() now re-runs
-// forcePerfectTurkish() over every cached line (not just the romaja/
-// ad-lib cases from V39), which cleans up old entries like "sabahınızı"
-// that were cached before today's regex coverage existed.
+// Also trimmed the "all 16 combos are down at once" global backoff
+// ceiling from 10 minutes down to 3 minutes, since that situation should
+// now be rare and short-lived rather than the normal state of a
+// listening session.
 //
-// UNCHANGED from V39: everything else (romaja glomming repair, ad-lib
-// fallback protection, persistent backoff state, right-click+OK does
+// UNCHANGED from V40: the actual translation prompt/rules, romaja glomming
+// repair, ad-lib fallback protection, MyMemory language-detect fix, the
+// conjugation rule, persistent backoff state across reloads, right-click+OK
 // full reset+repair, single-source-of-truth styling, watchdog, singleton
-// guard, idempotent rendering, persistent translation cache key).
+// guard, idempotent rendering, persistent translation cache key.
 
-(function spicyTurkishProV40() {
+(function spicyTurkishProV41() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V40]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V40]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V40]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V41]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V41]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V41]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function fetchWithTimeout(url, options, timeoutMs) {
@@ -111,11 +108,16 @@
   const failedUntil = new Map();
   const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
-  const MODEL_DEAD_SHORT_MS = 60000;              // transient error (rate limit, 5xx)
-  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;  // 404 = wrong/retired model id
-  const MODEL_DEAD_QUOTA_MS = 3 * 60 * 60 * 1000; // real "quota exceeded" 429 - not worth retrying every minute
+  // V41: a single short cooldown now covers EVERY transient Gemini failure -
+  // 429 (per-minute rate limit OR daily quota, Google's error text can't
+  // reliably tell them apart), 5xx, and timeouts. 45s is enough that with
+  // 4 keys x 4 models the pool recovers almost immediately on its own,
+  // instead of a combo sitting sidelined for hours over what is usually
+  // just a 60-second window.
+  const MODEL_DEAD_SHORT_MS = 45000;
+  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;  // 404 = wrong/retired model id, genuinely permanent until the model list is updated
 
-  const GEMINI_BACKOFF_STEPS_MS = [60000, 120000, 300000, 600000];
+  const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // 30s,1m,2m,3m - only hit when ALL 16 combos are down AT ONCE, which should now be rare
   let geminiGloballyDownUntil = 0;
   let geminiBackoffStage = 0;
 
@@ -178,13 +180,6 @@
   }
   loadBackoffState();
 
-  // V40: the model ids below were corrected after gemini-2.5-flash and
-  // gemini-2.5-flash-lite both started returning a hard 404 "no longer
-  // available to new users" live in testing. If this ever happens again
-  // (Google retires another model), the deadModels map will show a 404
-  // for that specific combo in the console - that's your signal a model
-  // id here needs updating, as opposed to a 429/503 which just means
-  // "busy right now, will recover on its own".
   const GEMINI_MODELS = [
     'gemini-3.5-flash',
     'gemini-3-flash-preview',
@@ -258,10 +253,10 @@
         continue;
       }
 
-      // 3) (V40) Leftover formal "siz" forms or other patterns that
-      // today's forcePerfectTurkish would now catch but didn't exist (or
-      // wasn't applied) when this line was first cached. Guarded on both
-      // sides so this can never accidentally turn a suppressed/untranslated
+      // 3) Leftover formal "siz" forms or other patterns that today's
+      // forcePerfectTurkish would now catch but didn't exist (or wasn't
+      // applied) when this line was first cached. Guarded on both sides
+      // so this can never accidentally turn a suppressed/untranslated
       // marker (tr === rawLine) into a bogus visible "translation".
       if (data.tr && normalize(data.tr) !== normalize(rawLine)) {
         const reformalized = forcePerfectTurkish(data.tr);
@@ -412,9 +407,8 @@
 
   // MyMemory's public API has no reliable auto-detect: "auto",
   // "autodetect" and "AUTODETECT" all hard-fail with "IS AN INVALID
-  // SOURCE LANGUAGE" - confirmed live in your console, and a known public
-  // issue with their API in general. This script-side guess replaces it
-  // (same workaround other MyMemory client libraries use in the wild).
+  // SOURCE LANGUAGE". This script-side guess replaces it (same workaround
+  // other MyMemory client libraries use in the wild).
   function detectSourceLangForMyMemory(text) {
     if (/[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]/.test(text)) return 'ko';
     if (/[\u3040-\u30FF]/.test(text)) return 'ja';
@@ -631,17 +625,15 @@ CRITICAL RULES:
             } catch (parseErr) {}
             geminiLastError = `[${model} ...${keyFp(apiKey)}] HTTP ${res.status}${bodyMsg ? ' - ' + bodyMsg : ''}`;
 
-            const isRealQuotaError = res.status === 429 && /quota/i.test(bodyMsg);
-
             if (res.status === 404) {
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
               warn(`Model "${model}" bulunamadı (404, anahtar ...${keyFp(apiKey)}) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
-            } else if (isRealQuotaError) {
-              deadModels.set(comboKey, Date.now() + MODEL_DEAD_QUOTA_MS);
-              warn(`[${model} ...${keyFp(apiKey)}] Gerçek kota hatası (daily quota) - ${Math.round(MODEL_DEAD_QUOTA_MS / 3600000)} saat boyunca bu kombinasyon denenmeyecek`);
             } else {
+              // V41: 429 (rate limit OR daily quota - can't reliably tell
+              // apart from the message text) and every other transient
+              // error all share the same short cooldown now.
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
-              warn(`Gemini hatası: ${geminiLastError}`);
+              warn(`[${model} ...${keyFp(apiKey)}] geçici hata (HTTP ${res.status}) - ~${Math.round(MODEL_DEAD_SHORT_MS / 1000)}sn sonra bu kombinasyon tekrar denenecek${bodyMsg ? ': ' + bodyMsg : ''}`);
             }
             saveBackoffState();
             throw new Error(geminiLastError);
@@ -709,10 +701,7 @@ CRITICAL RULES:
     if (allCombosDead) {
       const waitMs = GEMINI_BACKOFF_STEPS_MS[Math.min(geminiBackoffStage, GEMINI_BACKOFF_STEPS_MS.length - 1)];
       if (geminiGloballyDownUntil <= Date.now()) {
-        warn(`Tüm Gemini anahtar/model kombinasyonları kullanılamıyor (kota/limit olabilir) - yedek motorlara geçiliyor, ${Math.round(waitMs / 1000)}sn sonra Gemini tekrar denenecek`);
-        if (geminiApiKeys.length > 1) {
-          warn('Not: birden fazla anahtarın hepsi AYNI ANDA tükendiyse, bunlar muhtemelen aynı Google hesabına ait farklı API anahtarlarıdır (kota hesap bazlı paylaşılıyor olabilir). Gerçekten bağımsız kota için her anahtarın FARKLI bir Google hesabından alınması gerekir.');
-        }
+        warn(`Tüm Gemini anahtar/model kombinasyonları şu an soğumada (geçici) - yedek motorlara geçiliyor, ${Math.round(waitMs / 1000)}sn sonra Gemini tekrar denenecek`);
       }
       geminiGloballyDownUntil = Date.now() + waitMs;
       geminiBackoffStage++;
@@ -1059,16 +1048,16 @@ CRITICAL RULES:
       ].filter(Boolean).join(' | ');
       btn.title = `Tüm çeviri motorları şu anda kullanılamıyor - ${reasons || 'sebep henüz kaydedilmedi'} - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
     } else if (geminiDown && (gtxDown || mmDown)) {
-      btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'kota/limit'}), kalan yedek motorla devam ediliyor`;
+      btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'geçici'}), kalan yedek motorla devam ediliyor`;
     } else if (geminiDown) {
-      btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'kota/limit'}) - geçici olarak sadece yedek (ücretsiz) motorlar kullanılıyor`;
+      btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'geçici'}) - geçici olarak sadece yedek (ücretsiz) motorlar kullanılıyor`;
     } else if (gtxDown || mmDown) {
       const which = gtxDown ? 'Google Translate' : 'MyMemory';
       const reason = gtxDown ? gtxLastError : mmLastError;
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V40 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
+        ? `God Mode V41 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -1103,7 +1092,7 @@ CRITICAL RULES:
       e.preventDefault();
       try {
         const currentValue = geminiApiKeys.join(', ');
-        const input = prompt('🌟 Spicy Lyrics V40 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
+        const input = prompt('🌟 Spicy Lyrics V41 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
         if (input === null) return;
 
         geminiApiKeys = Array.from(new Set(
