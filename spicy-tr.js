@@ -1,63 +1,60 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 36.0.0 (No More Cache Wipes + Multi-Key Rotation + 3rd Fallback Engine)
+// VERSION: 37.0.0 (Fixed: translations silently disappearing / toggle not sticking)
 //
-// PREVIOUS HISTORY (condensed): V20-V33 fixed CSS bleed-through, song-change
-// and seek detection, persistent localStorage caching, and the core "never
-// leave a line untranslated" + ad-lib rules. V34.x moved to whole-song
-// batch translation with per-line GTX fallback and exponential backoff for
-// both engines instead of hammering a dead quota. V35 replaced the fragile
-// "SRC:/ROM:/TR:/---" text block + fuzzy text-matching with native JSON
-// structured output mapped back to lines by position, turned off Gemini's
-// default "thinking" (it was silently eating the output-token budget and
-// could truncate long songs), raised the output cap to the models' real
-// ceiling, and added gemini-2.5-flash-lite as a high-quota fallback model.
+// V37 - WHAT CHANGED AND WHY:
 //
-// V36 - WHAT CHANGED AND WHY (direct response to real-world reports):
+// ROOT CAUSE FOUND: the enabled/disabled state was baked into the <style>
+// tag ONCE at script load time (`display: ${isEnabled ? 'flex':'none'}`).
+// Every successful translation call `updateDOMWithCache()` tore down and
+// rebuilt EVERY translation box on screen - and every freshly rebuilt box
+// fell back to that frozen, load-time display value instead of the live
+// toggle state. Result: translations would silently revert to hidden the
+// moment any new line finished translating (i.e. constantly, during normal
+// playback), and toggling the button only "fixed" boxes that existed at
+// that exact instant.
 //
-// 1) STOPPED WIPING THE TRANSLATION CACHE ON VERSION/KEY CHANGES. V35
-//    bumped the cache storage key (to avoid mixing old/new translation
-//    style) and the "edit API key" button ALSO wiped the cache as part of
-//    its "unstick everything" reset. In practice this meant: the first
-//    time V35 loaded, every previously-cached line across every song
-//    became a cache miss at once, and simply opening the key-edit prompt
-//    to add a key did the same thing again - both cause a sudden burst of
-//    API calls that can exhaust a free key's daily quota in minutes
-//    instead of the hours it would normally take, which is almost
-//    certainly why translation can appear to "just stop" right after
-//    editing the key or updating the script. V36 keeps the SAME cache
-//    storage key as V35 (do not bump this casually in a future patch -
-//    see above) and the key-edit prompt no longer touches the cache at
-//    all, only backoff timers get reset (cheap, no data loss). A full
-//    cache wipe is still available on purpose (Shift+right-click) for
-//    when one is actually needed.
+// FIX: the on/off state now lives in ONE place - a `spicy-tr-off` class on
+// <body> - and every box, wherever/whenever it's created, inherits from
+// that single live source via CSS cascade. No more frozen snapshots.
 //
-// 2) MULTIPLE GEMINI API KEYS: the key-edit prompt now accepts several
-//    comma-separated keys. Each free Google account/key has its own
-//    separate daily quota, so two or three keys together are two or three
-//    times the effective free-tier headroom. Tried best-model-first across
-//    every key before ever dropping to a lower-tier model.
+// ADDED:
+// - Watchdog: independent 1.5s interval that re-applies the enabled class,
+//   re-injects the stylesheet if the host page ever removes it, and runs a
+//   full rescan - a safety net that doesn't depend on any single trigger
+//   (mutation observer / songchange / seek) firing correctly.
+// - Singleton guard: if this script gets re-executed in the same session
+//   (Spicetify sometimes does this on view remount), the previous instance
+//   is fully torn down first (observer, listeners, interval, DOM nodes)
+//   instead of silently piling up and fighting the new one.
+// - renderSubtitles() is now idempotent: if a line's cached translation
+//   hasn't changed, its box is left untouched instead of being destroyed
+//   and recreated - cuts DOM churn and the feedback loop that came with it.
+// - All entry points (observer callback, scroll/songchange/progress
+//   handlers, button clicks, watchdog tick) wrapped in try/catch with
+//   console logging, so a single unexpected error can't silently kill
+//   everything without leaving a trace.
 //
-// 3) THIRD FALLBACK ENGINE: added MyMemory (api.mymemory.translated.net,
-//    no key required, independent rate-limit pool from Google Translate)
-//    behind GTX. It has no romanization output of its own, so it only
-//    fills in the Turkish line, not the romaja line - but it's one more
-//    independent chance at a result, and it means Gemini and GTX both
-//    being rate-limited at the same moment no longer stops translation
-//    outright.
-//
-// HONESTY NOTE: none of this invents quota Google/MyMemory haven't
-// granted - it reduces how much of it the tool itself was burning
-// needlessly, and spreads real usage across more independent pools. On a
-// single free key with heavy same-session listening, you can still
-// eventually hit a wall for the day; more keys and the 3rd engine push
-// that wall a lot further out, they don't remove it.
+// UNCHANGED from V36 (these were not the problem): the persistent cache
+// key/contents, multi-key Gemini rotation, the GTX + MyMemory fallback
+// cascade, and all translation-quality prompt rules.
 
-(function spicyTurkishProV36() {
+(function spicyTurkishProV37() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V36]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V36]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V36]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V37]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V37]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V37]', 'color:#ff4b4b;font-weight:bold', ...args); };
+
+  // --- Singleton guard: tear down any previous instance of this script
+  // still running in this session before we set anything up. ---
+  if (typeof window.__spicyTRCleanup === 'function') {
+    try {
+      window.__spicyTRCleanup();
+      log('Önceki script örneği tespit edildi ve temizlendi.');
+    } catch (e) {
+      err('Önceki örnek temizlenirken hata (yine de devam ediliyor):', e);
+    }
+  }
 
   [
     'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
@@ -66,12 +63,8 @@
     'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28', 'spicy_tr_godmode_v29',
     'spicy_tr_godmode_v30', 'spicy_tr_godmode_v31', 'spicy_tr_godmode_v32',
     'spicy_tr_godmode_v33', 'spicy_tr_godmode_v34'
-    // NOTE: 'spicy_tr_godmode_v34_1' and 'spicy_tr_godmode_v35' are
-    // deliberately NOT in this list. V35 already consumed v34_1 once; V36
-    // intentionally keeps reading/writing the SAME key V35 used
-    // (STORAGE_CACHE_KEY below) instead of rotating to a new one, so nobody
-    // loses a cache again just from updating the script. Only bump this key
-    // if the cached DATA SHAPE itself changes, never just to "freshen" it.
+    // 'spicy_tr_godmode_v35' deliberately stays as the live cache key below -
+    // do not bump this just to "freshen" things, it wipes everyone's cache.
   ].forEach(k => localStorage.removeItem(k));
 
   const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v35';
@@ -84,24 +77,21 @@
 
   const cache = new Map(Object.entries(savedCache));
   const inFlight = new Set();
-  const failedUntil = new Map(); // rawText -> timestamp; don't retry before this
+  const failedUntil = new Map();
   const FAILURE_COOLDOWN_MS = 12000;
-  const deadModels = new Map(); // "<keyFingerprint>::<model>" -> cooldown timestamp
-  const MODEL_DEAD_SHORT_MS = 60000;            // transient error (rate limit, 5xx)
-  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000; // 404 = wrong/retired model id
+  const deadModels = new Map();
+  const MODEL_DEAD_SHORT_MS = 60000;
+  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;
 
-  // Exponential backoff state for Gemini as a whole (resets on any success)
-  const GEMINI_BACKOFF_STEPS_MS = [60000, 120000, 300000, 600000]; // 1m,2m,5m,10m
+  const GEMINI_BACKOFF_STEPS_MS = [60000, 120000, 300000, 600000];
   let geminiGloballyDownUntil = 0;
   let geminiBackoffStage = 0;
 
-  // Exponential backoff state for GTX (resets to stage 0 on any success)
-  const GTX_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000]; // 30s..8m
+  const GTX_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000];
   let gtxGloballyDownUntil = 0;
   let gtxBackoffStage = 0;
   let gtxConsecutiveFailures = 0;
 
-  // Exponential backoff state for MyMemory (same shape as GTX, independent)
   const MM_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000];
   let mmGloballyDownUntil = 0;
   let mmBackoffStage = 0;
@@ -110,7 +100,6 @@
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   let batchTimer = null;
 
-  // --- Gemini API keys: supports one or many, comma/newline separated ---
   const GEMINI_KEYS_STORAGE = 'spicy_tr_gemini_keys';
   function keyFp(key) {
     return (key || '').trim().slice(-6);
@@ -122,7 +111,6 @@
       geminiApiKeys = storedKeys.filter(k => typeof k === 'string' && k.trim().length > 10);
     }
   } catch (e) {}
-  // One-time migration from the old single-key format (pre-V36).
   const legacyKey = localStorage.getItem('spicy_tr_gemini_key');
   if (legacyKey && legacyKey.trim().length > 10 && !geminiApiKeys.includes(legacyKey.trim())) {
     geminiApiKeys.push(legacyKey.trim());
@@ -130,16 +118,7 @@
   }
   localStorage.removeItem('spicy_tr_gemini_key');
 
-  // A whole typical song (verses+chorus+bridge, de-duplicated) almost always
-  // fits under this in one Gemini call. If a song has more unique lines than
-  // this, it's split into sequential (not parallel) groups, each still
-  // carrying the full song as context, so quota usage stays bounded even on
-  // unusually long songs.
   const MAX_LINES_PER_GEMINI_CALL = 50;
-  // Real ceiling for all four models below is 65536 output tokens. With
-  // thinking turned off, every one of those tokens goes to the actual JSON
-  // translation instead of invisible reasoning, so this is comfortably more
-  // than even a 50-line/call batch needs - the goal is "never truncate".
   const GEMINI_MAX_OUTPUT_TOKENS = 65536;
 
   function markFailed(text, cooldownMs) {
@@ -155,6 +134,11 @@
     } catch (e) {}
   }
 
+  // --- Stylesheet: NOTE the enabled/disabled state is NOT baked in here
+  // anymore. .spicy-tr-box is always display:flex by default; the single
+  // `body.spicy-tr-off` rule is the only thing that ever hides it, and it
+  // applies to every box automatically via cascade - present or future,
+  // no matter when/how that box gets created. ---
   const style = document.createElement('style');
   style.id = 'spicy-tr-style';
   style.textContent = `
@@ -184,12 +168,17 @@
       flex-basis: 100% !important;
       width: 100% !important;
       margin-top: 6px !important;
-      display: ${isEnabled ? 'flex' : 'none'} !important;
+      display: flex !important;
       flex-direction: column !important;
       gap: 3px !important;
       pointer-events: none !important;
       line-height: 1.35 !important;
       opacity: 1 !important;
+    }
+    /* Single source of truth for on/off - applies to every .spicy-tr-box
+       anywhere under <body>, created at any time, automatically. */
+    body.spicy-tr-off .spicy-tr-box {
+      display: none !important;
     }
     #SpicyLyricsPage .spicy-tr-romaja {
       font-size: 0.46em !important;
@@ -220,6 +209,15 @@
   document.getElementById('spicy-tr-style')?.remove();
   document.head.appendChild(style);
 
+  // Applies the live isEnabled value to the one real source of truth.
+  // Safe/cheap to call repeatedly (classList.toggle is a no-op if already
+  // correct) - called on every scan AND every watchdog tick so it can
+  // never drift out of sync with the toggle state again.
+  function applyEnabledClass() {
+    document.body.classList.toggle('spicy-tr-off', !isEnabled);
+  }
+  applyEnabledClass();
+
   let resizeTimer;
   function triggerRecalc() {
     clearTimeout(resizeTimer);
@@ -234,11 +232,6 @@
     return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   }
 
-  // Safety net for the "words glued together with no space" pattern seen in
-  // real output (romanization AND, occasionally, the Turkish line itself).
-  // JSON output removed one whole class of join-related glue bugs, but a
-  // single string field can still come back glued if the model itself drops
-  // a space - this catches that regardless of source.
   function fixGluedWords(s) {
     if (!s) return s;
     return s.replace(/([a-zçğıöşü0-9])([A-ZÇĞİÖŞÜ])/g, '$1 $2');
@@ -318,12 +311,20 @@
     return t;
   }
 
+  // Idempotent now: if this exact line's box already shows this exact
+  // cached data, nothing is touched. This is what stops the "every new
+  // translation wipes the whole screen" churn, and makes the box's
+  // continued existence independent of the enabled/disabled styling
+  // (that's handled purely by the body class + CSS cascade now).
   function renderSubtitles(lineEl, data, rawText) {
+    const marker = `${data.tr || ''}\u0000${data.romaja || ''}`;
     let box = lineEl.querySelector('.spicy-tr-box');
+    if (box && box.dataset.marker === marker) return;
     if (box) box.remove();
 
     box = document.createElement('div');
     box.className = 'spicy-tr-box';
+    box.dataset.marker = marker;
 
     if (data.romaja && isNonLatin(rawText)) {
       const romEl = document.createElement('div');
@@ -355,12 +356,6 @@
     });
   }
 
-  // Parses the JSON array Gemini is asked to return (one {rom, tr} object
-  // per requested line, in order). Returns null on anything that isn't
-  // EXACTLY an array of the expected length - the caller treats null as a
-  // full miss for the whole chunk rather than trying to salvage a partial
-  // result, which is what makes this immune to the old "misaligned SRC
-  // match" failure class: there is nothing left to misalign.
   function parseGeminiJsonArray(rawOutput, expectedCount) {
     if (!rawOutput) return null;
     const cleaned = rawOutput.trim().replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/i, '');
@@ -374,11 +369,6 @@
     return parsed;
   }
 
-  // Ordered best-quality-first, except gemini-2.5-flash-lite which is kept
-  // LAST on purpose: it currently has the most generous free-tier daily
-  // quota of the four, so it's the high-headroom fallback that keeps
-  // translation alive once the others are rate-limited for the day, not
-  // the first choice for quality.
   const GEMINI_MODELS = [
     'gemini-2.5-flash',
     'gemini-3-flash-preview',
@@ -386,10 +376,6 @@
     'gemini-2.5-flash-lite'
   ];
 
-  // chunkLines: the lines that still need a translation.
-  // allSongLines: every line currently known for this song (cached or not) -
-  // sent purely as context so the translation of chunkLines stays coherent
-  // with the whole song's meaning/tone, never output back.
   async function translateChunkWithGemini(chunkLines, allSongLines) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
@@ -420,11 +406,6 @@ CRITICAL RULES:
 
     let lastError = new Error('Tüm Gemini anahtar/model kombinasyonları şu an soğuma süresinde veya kullanılamıyor');
 
-    // Model-outer, key-inner: tries the best model across every configured
-    // key before ever dropping to a lower-tier model. This both reaches a
-    // working combo faster when one key is simply exhausted for the day,
-    // and keeps translation quality as high as possible for as long as
-    // possible across however many keys are configured.
     for (const model of GEMINI_MODELS) {
       for (const apiKey of geminiApiKeys) {
         const comboKey = `${keyFp(apiKey)}::${model}`;
@@ -476,14 +457,10 @@ CRITICAL RULES:
           chunkLines.forEach((rawLine, i) => {
             const item = parsed[i] || {};
             const trRaw = (item.tr || '').trim();
-            if (!trRaw) return; // left unmatched -> falls through to GTX/MyMemory
+            if (!trRaw) return;
 
             const cleanTr = fixGluedWords(forcePerfectTurkish(trRaw));
 
-            // If Gemini just echoed the line back untranslated, DON'T cache
-            // it - that would mark the line "done" forever while rendering
-            // nothing, permanently hiding it. Leave it unmatched so it
-            // falls through to the fallback engines below.
             if (normalize(cleanTr) === normalize(rawLine)) return;
 
             const cleanRom = isNonLatin(rawLine) ? fixGluedWords((item.rom || '').trim()) : '';
@@ -493,7 +470,7 @@ CRITICAL RULES:
           saveCache();
           updateDOMWithCache();
 
-          geminiGloballyDownUntil = 0; // it just worked, so Gemini is clearly back
+          geminiGloballyDownUntil = 0;
           geminiBackoffStage = 0;
 
           const leftover = chunkLines.filter(l => {
@@ -507,9 +484,6 @@ CRITICAL RULES:
       }
     }
 
-    // Every key x model combo was either on cooldown or just failed - back
-    // off with growing delays instead of hammering dead/quota-exhausted
-    // keys every fixed interval.
     const allCombosDead = geminiApiKeys.length === 0 ||
       GEMINI_MODELS.every(model => geminiApiKeys.every(apiKey => (deadModels.get(`${keyFp(apiKey)}::${model}`) || 0) > Date.now()));
 
@@ -525,12 +499,6 @@ CRITICAL RULES:
     throw lastError;
   }
 
-  // GTX (Google Translate) has no song context and is known to badly
-  // mistranslate a handful of very common rap/hip-hop slang words when they
-  // appear with no surrounding context. Gemini already handles this
-  // correctly (context + instructions), so this normalization ONLY applies
-  // to text sent to GTX/MyMemory, never to Gemini, and never changes what's
-  // cached/displayed as the "original" line.
   const SLANG_NORMALIZE = [
     [/\bhoes\b/gi, 'women'],
     [/\bhoe\b/gi, 'woman'],
@@ -543,8 +511,6 @@ CRITICAL RULES:
     return t;
   }
 
-  // Generic concurrency gate factory - used separately for GTX and MyMemory
-  // so a burst on one engine can never starve the other's slots.
   function makeConcurrencyGate(limit, spacingMs) {
     let active = 0;
     const waiters = [];
@@ -568,8 +534,6 @@ CRITICAL RULES:
   const gtxGate = makeConcurrencyGate(2, 220);
   const mmGate = makeConcurrencyGate(2, 250);
 
-  // One request per line, translation + romanization TOGETHER (dt=t&dt=rm)
-  // instead of two separate calls.
   async function translateWithGTXPerLine(linesToTranslate) {
     if (Date.now() < gtxGloballyDownUntil) {
       const remaining = Math.min(gtxGloballyDownUntil - Date.now(), 60000);
@@ -625,13 +589,6 @@ CRITICAL RULES:
     updateDOMWithCache();
   }
 
-  // Third, independent engine - no API key, own rate-limit pool, used only
-  // for whatever Gemini AND GTX both failed to produce. MyMemory doesn't
-  // return romanization, so this only ever fills "tr", never "romaja" -
-  // better to show the Turkish line with no pronunciation hint than to
-  // show nothing at all. Its free tier signals "out of quota" as an HTTP
-  // 200 with responseStatus !== 200 inside the JSON body, not as an HTTP
-  // error - so that field is what's actually checked, not the HTTP status.
   async function translateWithMyMemoryPerLine(linesToTranslate) {
     if (Date.now() < mmGloballyDownUntil) {
       const remaining = Math.min(mmGloballyDownUntil - Date.now(), 60000);
@@ -642,7 +599,7 @@ CRITICAL RULES:
     await Promise.all(linesToTranslate.map(async (rawText) => {
       await mmGate.acquire();
       try {
-        const q = normalizeForDumbEngines(rawText).slice(0, 480); // API caps q at 500 bytes
+        const q = normalizeForDumbEngines(rawText).slice(0, 480);
         const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=auto|tr`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -684,10 +641,6 @@ CRITICAL RULES:
     updateDOMWithCache();
   }
 
-  // Groups are processed SEQUENTIALLY (not in parallel) so a song never
-  // fires more than one Gemini call at a time. In the overwhelming majority
-  // of songs there is exactly one group. Each group cascades through all
-  // three engines before a line is left to wait for the next scan cycle.
   async function processQueue(allVisibleLines) {
     const now = Date.now();
     const missing = allVisibleLines.filter(t =>
@@ -728,6 +681,8 @@ CRITICAL RULES:
           await translateWithMyMemoryPerLine(stillMissing);
         }
       }
+    } catch (e) {
+      err('processQueue beklenmedik hata:', e);
     } finally {
       missing.forEach(t => inFlight.delete(t));
     }
@@ -756,7 +711,7 @@ CRITICAL RULES:
       btn.title = `${gtxDown ? 'Google Translate' : 'MyMemory'} şu anda geçici olarak kullanılamıyor (rate-limit) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V36 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: düzenle, Shift+sağ tık: cache'i de sıfırla)`
+        ? `God Mode V37 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: düzenle, Shift+sağ tık: cache'i de sıfırla)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -776,53 +731,53 @@ CRITICAL RULES:
     refreshToggleButtonVisual(btn);
 
     btn.onclick = () => {
-      isEnabled = !isEnabled;
-      localStorage.setItem('spicy_tr_enabled', isEnabled);
-      refreshToggleButtonVisual(btn);
-      document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => {
-        b.style.setProperty('display', isEnabled ? 'flex' : 'none', 'important');
-      });
-      triggerRecalc();
+      try {
+        isEnabled = !isEnabled;
+        localStorage.setItem('spicy_tr_enabled', isEnabled);
+        applyEnabledClass();
+        refreshToggleButtonVisual(btn);
+        triggerRecalc();
+      } catch (e) {
+        err('Toggle butonu hata verdi:', e);
+      }
     };
 
     btn.oncontextmenu = (e) => {
       e.preventDefault();
-      const currentValue = geminiApiKeys.join(', ');
-      const input = prompt('🌟 Spicy Lyrics V36 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, 2-3 anahtar = 2-3x kota):', currentValue);
-      if (input === null) return;
+      try {
+        const currentValue = geminiApiKeys.join(', ');
+        const input = prompt('🌟 Spicy Lyrics V37 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, 2-3 anahtar = 2-3x kota):', currentValue);
+        if (input === null) return;
 
-      geminiApiKeys = Array.from(new Set(
-        input.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
-      ));
-      try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
+        geminiApiKeys = Array.from(new Set(
+          input.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
+        ));
+        try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
 
-      // Reset backoff/cooldown state so the new/edited key(s) get tried
-      // right away - cheap to reset, no data loss. The translation CACHE
-      // is deliberately left untouched here: wiping it on every key edit
-      // was exactly what caused a mass-retranslation burst in V35.
-      geminiGloballyDownUntil = 0; geminiBackoffStage = 0;
-      gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0;
-      mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0;
-      deadModels.clear();
-      failedUntil.clear();
+        geminiGloballyDownUntil = 0; geminiBackoffStage = 0;
+        gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0;
+        mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0;
+        deadModels.clear();
+        failedUntil.clear();
 
-      // Shift+right-click = also wipe the translation cache on purpose
-      // (full nuclear reset, for when something actually looks corrupted
-      // or stuck). A plain right-click never touches cached translations.
-      if (e.shiftKey) {
-        cache.clear();
-        localStorage.removeItem(STORAGE_CACHE_KEY);
-        document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => b.remove());
-        log("Shift+sağ tık: cache de tamamen temizlendi");
+        if (e.shiftKey) {
+          cache.clear();
+          localStorage.removeItem(STORAGE_CACHE_KEY);
+          document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => b.remove());
+          log('Shift+sağ tık: cache de tamamen temizlendi');
+        }
+
+        refreshToggleButtonVisual(btn);
+        triggerMultiStageScan();
+      } catch (err2) {
+        err('Sağ tık menüsü hata verdi:', err2);
       }
-
-      refreshToggleButtonVisual(btn);
-      triggerMultiStageScan();
     };
     controls.appendChild(btn);
   }
 
   function scanLines() {
+    applyEnabledClass();
     injectToggleButton();
     const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
     const allVisibleTexts = [];
@@ -852,40 +807,38 @@ CRITICAL RULES:
       }, 50);
     }
   }
+  function safeScanLines() {
+    try { scanLines(); } catch (e) { err('scanLines hata verdi:', e); }
+  }
 
-  // Lightweight debounce specifically for scan triggers that fire on their
-  // own schedule and can arrive in bursts (DOM mutations anywhere on the
-  // page, scroll events) - collapses a burst into a single scanLines() call
-  // instead of one per event. triggerMultiStageScan() below calls
-  // scanLines() directly and is NOT routed through this, since its timing
-  // after a song change/seek is already deliberately staggered.
   let scanScheduled = false;
   function scheduleScan() {
     if (scanScheduled) return;
     scanScheduled = true;
     setTimeout(() => {
       scanScheduled = false;
-      scanLines();
+      safeScanLines();
     }, 80);
   }
 
   function triggerMultiStageScan() {
-    scanLines();
-    setTimeout(scanLines, 100);
-    setTimeout(scanLines, 300);
-    setTimeout(scanLines, 600);
-    setTimeout(scanLines, 1200);
+    safeScanLines();
+    setTimeout(safeScanLines, 100);
+    setTimeout(safeScanLines, 300);
+    setTimeout(safeScanLines, 600);
+    setTimeout(safeScanLines, 1200);
   }
 
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
-  window._spicyTrObserver = new MutationObserver(() => scheduleScan());
-  window._spicyTrObserver.observe(document.body, { childList: true, subtree: true });
+  const observer = new MutationObserver(() => {
+    try { scheduleScan(); } catch (e) { err('MutationObserver hata verdi:', e); }
+  });
+  window._spicyTrObserver = observer;
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  window.addEventListener('scroll', () => scheduleScan(), true);
+  const scrollHandler = () => scheduleScan();
+  window.addEventListener('scroll', scrollHandler, true);
 
-  // Seek detection: compare each reported position against what normal
-  // playback would predict since the last report. A big mismatch means the
-  // user scrubbed to a new point - force a rescan immediately.
   let lastKnownPos = null;
   let lastKnownPosAt = null;
   const SEEK_JUMP_THRESHOLD_MS = 1500;
@@ -905,16 +858,52 @@ CRITICAL RULES:
     lastKnownPosAt = now;
   }
 
-  if (Spicetify?.Player) {
-    Spicetify.Player.addEventListener("songchange", () => {
+  const songChangeHandler = () => {
+    try {
       lastKnownPos = null;
       lastKnownPosAt = null;
       setTimeout(triggerMultiStageScan, 50);
-    });
-    Spicetify.Player.addEventListener("onprogress", (event) => {
-      handleProgress(event?.data);
-    });
+    } catch (e) { err('songchange handler hata verdi:', e); }
+  };
+  const progressHandler = (event) => {
+    try { handleProgress(event?.data); } catch (e) { err('progress handler hata verdi:', e); }
+  };
+
+  if (Spicetify?.Player) {
+    Spicetify.Player.addEventListener('songchange', songChangeHandler);
+    Spicetify.Player.addEventListener('onprogress', progressHandler);
   }
+
+  // Watchdog: independent safety net. Doesn't trust any other trigger to
+  // have fired correctly - just re-asserts correct state and does a full
+  // rescan on a fixed clock, every 1.5s, for as long as this instance lives.
+  const watchdogInterval = setInterval(() => {
+    try {
+      applyEnabledClass();
+      if (!document.getElementById('spicy-tr-style')) {
+        document.head.appendChild(style);
+        log('Stil etiketi kayboldu, yeniden eklendi.');
+      }
+      scanLines();
+    } catch (e) {
+      err('Watchdog turu hata verdi:', e);
+    }
+  }, 1500);
+
+  window.__spicyTRCleanup = function () {
+    try { observer.disconnect(); } catch (e) {}
+    try { clearInterval(watchdogInterval); } catch (e) {}
+    try { clearTimeout(batchTimer); } catch (e) {}
+    try { window.removeEventListener('scroll', scrollHandler, true); } catch (e) {}
+    try {
+      if (Spicetify?.Player) {
+        Spicetify.Player.removeEventListener('songchange', songChangeHandler);
+        Spicetify.Player.removeEventListener('onprogress', progressHandler);
+      }
+    } catch (e) {}
+    try { document.getElementById('spicy-tr-style')?.remove(); } catch (e) {}
+    try { document.getElementById('spicy-tr-toggle-btn')?.remove(); } catch (e) {}
+  };
 
   triggerMultiStageScan();
 })();
