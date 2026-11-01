@@ -1,63 +1,50 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 41.0.0 (Killed the 3-hour "daily quota" exile - it was a false
-//           positive that was burning through all 4 keys x 4 models
-//           within a handful of songs)
+// VERSION: 42.0.0 (Skip already-Turkish lines entirely + stronger
+//           localization/register-matching rule)
 //
-// V41 - WHAT CHANGED AND WHY (direct response to your own console logs,
-// which showed gemini-3.5-flash and gemini-3-flash-preview, across
-// several DIFFERENT key fingerprints, all getting flagged "Gerçek kota
-// hatası (daily quota) - 3 saat" within the same short test session):
+// V42 - WHAT CHANGED AND WHY:
 //
-// ROOT CAUSE: Google's Gemini API returns HTTP 429 for TWO completely
-// different situations, and BOTH put the word "quota" in the error text:
-//   (a) a genuine 24-hour daily cap ("requests per day")
-//   (b) a 60-SECOND rolling rate limit ("requests per minute" / RPM) -
-//       this is the one free-tier keys hit constantly during normal,
-//       even light, back-to-back listening/testing - it clears on its
-//       own in under a minute.
-// V40's isRealQuotaError check only looked for the word "quota" in the
-// message, so it could not tell these apart - it was treating EVERY
-// ordinary per-minute rate limit as if it were a full-day ban, and
-// sidelining that key+model combo for 3 hours (MODEL_DEAD_QUOTA_MS).
-// With 4 keys x 4 models = 16 combos, a handful of quick API calls
-// during one short session was enough to get most or all 16 combos
-// wrongly marked dead for hours - which matches exactly what you saw:
-// plenty of unused daily quota sitting on those keys, but the script
-// itself had locked them all out of its own accord.
+// BUG: a Turkish-language song (e.g. "Beynimi Siktin" by ALIZADE) was
+// getting a redundant "translation" rendered underneath its own already-
+// Turkish lyrics - e.g. "Gitsem, iyi olur bence" getting a second line
+// "Gitsem daha iyi olacak sanki" underneath. The old code sent EVERY
+// line to the translation engines regardless of language, and only
+// suppressed the display if the engine echoed the EXACT same string
+// back. A paraphrase (which engines do naturally) didn't match that
+// check, so it rendered - and wasted a real API call doing it.
 //
-// FIX: the special "3-hour quota exile" is gone entirely. EVERY non-404
-// Gemini failure (429 included, 5xx, timeouts, whatever) now gets the
-// SAME short cooldown (MODEL_DEAD_SHORT_MS, 45s) as any other transient
-// hiccup. In practice this means your 4 keys just keep rotating through
-// each other continuously - if one combo fails, the very same request
-// already moves on to the next key/model within that same call, and the
-// failed combo is fair game again in well under a minute instead of 3
-// hours. This is much closer to how your old single-key V33 behaved (it
-// never blacklisted anything for more than a few seconds), just now
-// spread across 4 keys x 4 models instead of 1.
+// FIX: a new looksTurkish() check runs before a line is ever considered
+// for translation. It looks for Turkish-specific letters (ç ğ ı ö ş ü) or
+// a cluster of common Turkish function words. A line that matches is
+// skipped entirely during scanning - never added to the translation
+// queue, never sent to any engine, never given a translation box.
+// repairCache() also now purges any already-cached "translation" whose
+// SOURCE line is itself Turkish, cleaning up what earlier versions
+// already wasted calls on.
 //
-// The ONLY failure that still gets a long cooldown is a genuine HTTP 404
-// (MODEL_DEAD_LONG_MS, 6h) - that means the model id itself was retired
-// by Google, which no amount of retrying fixes, unlike a 429 which is
-// always temporary by definition.
+// LOCALIZATION QUALITY: rule 3b in the Gemini prompt is now much more
+// explicit, with concrete guidance (and the real examples you flagged)
+// for: idioms ("hold your horses" needs its Turkish functional
+// equivalent, not a literal horse reference), matching the source's
+// explicitness/register exactly (a vulgar line gets an equally direct,
+// contemporary Turkish equivalent - never softened into a dated or
+// euphemistic substitute), and nonsense/invented hook phrases (capture
+// the vibe, don't try to literally unpack something that was never
+// literal to begin with).
 //
-// Also trimmed the "all 16 combos are down at once" global backoff
-// ceiling from 10 minutes down to 3 minutes, since that situation should
-// now be rare and short-lived rather than the normal state of a
-// listening session.
-//
-// UNCHANGED from V40: the actual translation prompt/rules, romaja glomming
-// repair, ad-lib fallback protection, MyMemory language-detect fix, the
-// conjugation rule, persistent backoff state across reloads, right-click+OK
-// full reset+repair, single-source-of-truth styling, watchdog, singleton
+// UNCHANGED from V41: the 45s short cooldown for all transient Gemini
+// errors (the 3-hour "daily quota" exile is gone), the corrected model
+// list, the MyMemory language-detect fix, romaja glomming repair, ad-lib
+// fallback protection, persistent backoff state, right-click+OK full
+// reset+repair, single-source-of-truth styling, watchdog, singleton
 // guard, idempotent rendering, persistent translation cache key.
 
-(function spicyTurkishProV41() {
+(function spicyTurkishProV42() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V41]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V41]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V41]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V42]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V42]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V42]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function fetchWithTimeout(url, options, timeoutMs) {
@@ -108,16 +95,10 @@
   const failedUntil = new Map();
   const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
-  // V41: a single short cooldown now covers EVERY transient Gemini failure -
-  // 429 (per-minute rate limit OR daily quota, Google's error text can't
-  // reliably tell them apart), 5xx, and timeouts. 45s is enough that with
-  // 4 keys x 4 models the pool recovers almost immediately on its own,
-  // instead of a combo sitting sidelined for hours over what is usually
-  // just a 60-second window.
   const MODEL_DEAD_SHORT_MS = 45000;
-  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;  // 404 = wrong/retired model id, genuinely permanent until the model list is updated
+  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000; // 404 = wrong/retired model id, genuinely permanent until the model list is updated
 
-  const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // 30s,1m,2m,3m - only hit when ALL 16 combos are down AT ONCE, which should now be rare
+  const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000];
   let geminiGloballyDownUntil = 0;
   let geminiBackoffStage = 0;
 
@@ -133,11 +114,6 @@
   let mmBackoffStage = 0;
   let mmConsecutiveFailures = 0;
 
-  // --- Persist cooldown/backoff state across script reloads. Without
-  // this, re-installing/testing a new version (or Spotify restarting)
-  // forgets a real, still-active rate limit and immediately re-triggers
-  // it. Refreshed periodically by the watchdog; restored here on load,
-  // but only if it hasn't actually expired yet. ---
   const BACKOFF_STATE_KEY = 'spicy_tr_backoff_state_v1';
   function saveBackoffState() {
     try {
@@ -174,7 +150,7 @@
         });
       }
       if (geminiGloballyDownUntil > now || gtxGloballyDownUntil > now || mmGloballyDownUntil > now || deadModels.size > 0) {
-        log('Önceki oturumdan hâlâ geçerli olan bekleme süreleri geri yüklendi (gerçek limitler tekrar tetiklenmesin diye).');
+        log('Önceki oturumdan hâlâ geçerli olan bekleme süreleri geri yüklendi.');
       }
     } catch (e) {}
   }
@@ -224,16 +200,22 @@
     } catch (e) {}
   }
 
-  // Repairs data corrupted by bugs from earlier versions. All of these
-  // got cached permanently since nothing ever re-validated a cache hit.
-  // Runs once on load, and again any time you right-click the toggle + OK.
   function repairCache() {
-    let fixed = 0, purged = 0, reformalFixed = 0;
+    let fixed = 0, purged = 0, reformalFixed = 0, turkishPurged = 0;
     for (const [rawLine, data] of Array.from(cache.entries())) {
       if (!data) continue;
+
+      // 0) (V42) A line that is itself already Turkish never needed a
+      // "translation" in the first place - whatever got cached for it is
+      // pure waste (and usually just a reworded paraphrase of itself).
+      if (looksTurkish(rawLine)) {
+        cache.delete(rawLine);
+        turkishPurged++;
+        continue;
+      }
+
       let changed = false;
 
-      // 1) Glued/unspaced romanization (V39 fix) - repair or discard.
       if (data.romaja && !/\s/.test(data.romaja) && data.romaja.length >= 8) {
         const repaired = splitRepeatingUnit(data.romaja);
         if (repaired) {
@@ -246,18 +228,12 @@
         if (changed) fixed++;
       }
 
-      // 2) Literal word-by-word ad-lib mistranslation (V39 fix) - purge.
       if (isAdlibPattern(rawLine) && data.tr && data.tr.includes('&') && normalize(data.tr) !== normalize(rawLine)) {
         cache.delete(rawLine);
         purged++;
         continue;
       }
 
-      // 3) Leftover formal "siz" forms or other patterns that today's
-      // forcePerfectTurkish would now catch but didn't exist (or wasn't
-      // applied) when this line was first cached. Guarded on both sides
-      // so this can never accidentally turn a suppressed/untranslated
-      // marker (tr === rawLine) into a bogus visible "translation".
       if (data.tr && normalize(data.tr) !== normalize(rawLine)) {
         const reformalized = forcePerfectTurkish(data.tr);
         if (reformalized && reformalized !== data.tr && normalize(reformalized) !== normalize(rawLine)) {
@@ -269,9 +245,9 @@
 
       if (changed) cache.set(rawLine, data);
     }
-    if (fixed || purged || reformalFixed) {
+    if (fixed || purged || reformalFixed || turkishPurged) {
       saveCache();
-      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi, ${reformalFixed} satırda resmi/"siz" kalıntısı temizlendi.`);
+      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi, ${reformalFixed} satırda resmi/"siz" kalıntısı temizlendi, ${turkishPurged} zaten-Türkçe satırın gereksiz çevirisi silindi.`);
     }
   }
   repairCache(); // helper functions below are hoisted, safe to call here
@@ -363,9 +339,20 @@
     return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   }
 
-  // Detects a string with NO whitespace that is a clean repetition of one
-  // short unit (e.g. "mamamamamama" -> "ma" x6) and reconstructs it with
-  // spaces between each repeat.
+  // (V42) A line that's already Turkish never needs translating. Turkish-
+  // specific letters are a near-unambiguous signal; for short lines with
+  // none of those, fall back to a small set of very common Turkish
+  // function words matched as whole words.
+  const TURKISH_COMMON_WORDS = /\b(bir|bu|şu|ben|sen|biz|siz|değil|gibi|için|ama|çok|var|yok|ile|ne|nasıl|neden|her|daha|olan|oldu|olacak|sanki|kadar|benim|senin|onun|beni|seni|bana|sana|gel|gelse|değilsin|yine|hep|artık|belki|hiç)\b/i;
+  function looksTurkish(text) {
+    if (!text) return false;
+    if (/[çÇğĞıİşŞöÖüÜ]/.test(text)) return true;
+    const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return false;
+    const matches = words.filter(w => TURKISH_COMMON_WORDS.test(w)).length;
+    return matches >= 2 || (words.length <= 3 && matches >= 1);
+  }
+
   function splitRepeatingUnit(s) {
     if (!s || /\s/.test(s)) return null;
     const n = s.length;
@@ -405,10 +392,6 @@
     return maxCount / tokens.length >= 0.6;
   }
 
-  // MyMemory's public API has no reliable auto-detect: "auto",
-  // "autodetect" and "AUTODETECT" all hard-fail with "IS AN INVALID
-  // SOURCE LANGUAGE". This script-side guess replaces it (same workaround
-  // other MyMemory client libraries use in the wild).
   function detectSourceLangForMyMemory(text) {
     if (/[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]/.test(text)) return 'ko';
     if (/[\u3040-\u30FF]/.test(text)) return 'ja';
@@ -572,7 +555,11 @@ CRITICAL RULES:
    RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır", "sabahını"
 2. NO LINE SKIP OR SHIFT: your JSON array MUST contain exactly ${chunkLines.length} objects, one per numbered line above, in the exact same order - including lines that are already in English, already seem simple/understandable, or match the song's title. Never leave a line as-is just because it "already makes sense" - every line gets its own real Turkish translation.
 3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word for the "tr" field - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
-3b. FEELING OVER LITERAL WORDS: you are localizing a song for a Turkish listener to FEEL, not producing a dictionary crib. Prefer the natural way a Turkish songwriter/poet would phrase the same image over a flat word-for-word rendering - e.g. for an intensified color/quality, prefer Turkish's own reduplicated intensifiers where they fit naturally ("masmavi" rather than "çok mavi", "bembeyaz" rather than "çok beyaz", "güpegündüz" for broad daylight), and generally favor an evocative, idiomatic phrase over a technically-accurate-but-stiff one, as long as the core meaning is preserved.
+3b. FULL CONTEXTUAL LOCALIZATION, NOT LITERAL TRANSLATION: you are localizing, not translating word-by-word. Read each line in light of the whole song's story/mood (given above) and render what it MEANS and FEELS like in natural, idiomatic Turkish - never a stiff, dictionary-literal rendering that reads like a translation. Specifically:
+   - IDIOMS: translate the idiom's actual function/meaning, never word-for-word. "Hold your horses" means "wait/slow down, be patient" - find the Turkish expression that does that job, not a literal horse reference.
+   - EXPLICITNESS AND REGISTER MUST MATCH EXACTLY: if the source line is vulgar, crude, or sexually explicit, your Turkish must be equally direct and explicit using a natural, CONTEMPORARY vulgar/slang equivalent - never soften it into an outdated, euphemistic, or awkward substitute just because it's crude. A toned-down or old-fashioned translation of an explicit line is a WRONG translation, not a safer one. Match playful lines playfully, intimate lines intimately, aggressive lines aggressively.
+   - NONSENSE / INVENTED HOOK PHRASES: pop lyrics sometimes use made-up or sound-driven phrases with no literal real-world meaning (a title hook built from onomatopoeia or wordplay, e.g. "Bubble pop electric"). For these, do not attempt a literal word-for-word unpacking that won't make sense anyway - instead capture the ENERGY/VIBE of the phrase in a natural-sounding Turkish phrase or kept stylized expression.
+   - Prefer Turkish's own reduplicated intensifiers where they fit naturally ("masmavi" rather than "çok mavi", "bembeyaz" rather than "çok beyaz", "güpegündüz" for broad daylight), and generally favor an evocative, idiomatic phrase over a technically-accurate-but-stiff one, as long as the core meaning is preserved.
 3c. TITLE / HOOK LINES: a line that IS or closely matches the song's own title (given above as "Song:"), or a repeated stylized hook built from mixed fragments, will not translate sensibly word-for-word. For these, give a short, natural-sounding Turkish phrase that captures the vibe/mood of the hook instead, the way a Turkish cover or localized title would read.
 4. ROMANIZATION IS MANDATORY for every line not already in Latin script - NEVER leave "rom" empty for Korean, Japanese, Chinese, Thai, or any other non-Latin script, even when a perfectly clean version is hard to produce. Always give your best simple phonetic attempt instead of skipping it. (Only use an empty string for "rom" when the line is ALREADY in Latin script.)
    STYLE: keep it casual and readable, the way an ordinary person types out pronunciation online. Standard single accent marks from an established system are fine. AVOID heavy academic/IAST-style transliteration with multiple stacked diacritics per letter.
@@ -629,11 +616,8 @@ CRITICAL RULES:
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
               warn(`Model "${model}" bulunamadı (404, anahtar ...${keyFp(apiKey)}) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
             } else {
-              // V41: 429 (rate limit OR daily quota - can't reliably tell
-              // apart from the message text) and every other transient
-              // error all share the same short cooldown now.
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
-              warn(`[${model} ...${keyFp(apiKey)}] geçici hata (HTTP ${res.status}) - ~${Math.round(MODEL_DEAD_SHORT_MS / 1000)}sn sonra bu kombinasyon tekrar denenecek${bodyMsg ? ': ' + bodyMsg : ''}`);
+              warn(`[${model} ...${keyFp(apiKey)}] geçici hata (HTTP ${res.status}) - ~${Math.round(MODEL_DEAD_SHORT_MS / 1000)}sn sonra tekrar denenecek${bodyMsg ? ': ' + bodyMsg : ''}`);
             }
             saveBackoffState();
             throw new Error(geminiLastError);
@@ -1057,7 +1041,7 @@ CRITICAL RULES:
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V41 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
+        ? `God Mode V42 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -1092,7 +1076,7 @@ CRITICAL RULES:
       e.preventDefault();
       try {
         const currentValue = geminiApiKeys.join(', ');
-        const input = prompt('🌟 Spicy Lyrics V41 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
+        const input = prompt('🌟 Spicy Lyrics V42 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
         if (input === null) return;
 
         geminiApiKeys = Array.from(new Set(
@@ -1130,6 +1114,7 @@ CRITICAL RULES:
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
       if (!text || text === '•••') return;
+      if (looksTurkish(text)) return; // already Turkish - never needs translating
 
       if (!allVisibleTexts.includes(text)) {
         allVisibleTexts.push(text);
