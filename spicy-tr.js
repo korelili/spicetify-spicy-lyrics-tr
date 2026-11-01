@@ -1,49 +1,71 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 37.0.0 (Fixed: translations silently disappearing / toggle not sticking)
+// VERSION: 38.0.0 (Fixed: whole-song fallback burst was tripping GTX+MyMemory
+//           simultaneously; real error diagnostics; active-line priority)
 //
-// V37 - WHAT CHANGED AND WHY:
+// V38 - WHAT CHANGED AND WHY (direct response to a real triple-lockout):
 //
-// ROOT CAUSE FOUND: the enabled/disabled state was baked into the <style>
-// tag ONCE at script load time (`display: ${isEnabled ? 'flex':'none'}`).
-// Every successful translation call `updateDOMWithCache()` tore down and
-// rebuilt EVERY translation box on screen - and every freshly rebuilt box
-// fell back to that frozen, load-time display value instead of the live
-// toggle state. Result: translations would silently revert to hidden the
-// moment any new line finished translating (i.e. constantly, during normal
-// playback), and toggling the button only "fixed" boxes that existed at
-// that exact instant.
+// ROOT CAUSE FOUND: when Gemini failed for an entire chunk (up to 50 lines -
+// in practice an entire song, since the whole lyric sheet is usually under
+// that), ALL of those lines were dumped onto Google Translate (GTX) at once,
+// 2-at-a-time with only 220ms spacing - enough to trip GTX's anonymous burst
+// limit within seconds. Whatever GTX still couldn't do was THEN dumped onto
+// MyMemory the same way, which has an even stricter anonymous quota and
+// tripped just as fast. Within under a minute both free fallback engines
+// were genuinely rate-limited - not a bug pretending to rate-limit, a real
+// self-inflicted burst against two low-tolerance free APIs. Multiple Gemini
+// keys don't help this part at all, because the problem only starts AFTER
+// Gemini has already failed for that chunk.
 //
-// FIX: the on/off state now lives in ONE place - a `spicy-tr-off` class on
-// <body> - and every box, wherever/whenever it's created, inherits from
-// that single live source via CSS cascade. No more frozen snapshots.
+// FIX: fallback requests (GTX and MyMemory) are no longer fired as one big
+// burst. They're split into small paced sub-batches with a pause between
+// each one, which keeps the request rate under what these free endpoints
+// tolerate. MyMemory, the most fragile of the three, is now fully
+// serialized (one request at a time).
 //
-// ADDED:
-// - Watchdog: independent 1.5s interval that re-applies the enabled class,
-//   re-injects the stylesheet if the host page ever removes it, and runs a
-//   full rescan - a safety net that doesn't depend on any single trigger
-//   (mutation observer / songchange / seek) firing correctly.
-// - Singleton guard: if this script gets re-executed in the same session
-//   (Spicetify sometimes does this on view remount), the previous instance
-//   is fully torn down first (observer, listeners, interval, DOM nodes)
-//   instead of silently piling up and fighting the new one.
-// - renderSubtitles() is now idempotent: if a line's cached translation
-//   hasn't changed, its box is left untouched instead of being destroyed
-//   and recreated - cuts DOM churn and the feedback loop that came with it.
-// - All entry points (observer callback, scroll/songchange/progress
-//   handlers, button clicks, watchdog tick) wrapped in try/catch with
-//   console logging, so a single unexpected error can't silently kill
-//   everything without leaving a trace.
+// ALSO ADDED:
+// - Priority ordering: every queue (Gemini chunk order, and especially the
+//   GTX/MyMemory leftover order) is now sorted so the line currently being
+//   sung and the lines coming up next are translated BEFORE lines from
+//   later/earlier in the song. If a rate limit does hit partway through a
+//   long queue, it hits the lines you've already passed, not the ones
+//   you're about to hear.
+// - Real failure diagnostics: every engine now records the ACTUAL reason
+//   for its last failure (HTTP status + the server's own error message
+//   where available, e.g. Gemini's "quota exceeded" text) instead of the
+//   tooltip just guessing "muhtemelen rate-limit". Check the console
+//   ([SpicyTR V38] tags) or hover the button for the real reason next time.
+// - A 10s timeout on every network request (GTX/MyMemory/Gemini), so one
+//   hung connection can no longer make an engine look "down" for no reason.
 //
-// UNCHANGED from V36 (these were not the problem): the persistent cache
-// key/contents, multi-key Gemini rotation, the GTX + MyMemory fallback
-// cascade, and all translation-quality prompt rules.
+// UNCHANGED from V37 (these were not the problem): the single-source-of-
+// truth enabled/disabled styling, the watchdog, the singleton guard, the
+// idempotent rendering, and the persistent cache key/contents.
 
-(function spicyTurkishProV37() {
+(function spicyTurkishProV38() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V37]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V37]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V37]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V38]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V38]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V38]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // Wraps fetch() with a hard timeout so one hung connection can't make an
+  // engine look permanently "down" (the old code had no timeout at all).
+  async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs || 10000);
+    try {
+      return await fetch(url, { ...(options || {}), signal: controller.signal });
+    } finally {
+      clearTimeout(id);
+    }
+  }
+
+  // Last REAL reason each engine failed for, shown in the tooltip/console
+  // instead of a guess. Kept short and human-readable.
+  let geminiLastError = '';
+  let gtxLastError = '';
+  let mmLastError = '';
 
   // --- Singleton guard: tear down any previous instance of this script
   // still running in this session before we set anything up. ---
@@ -413,7 +435,7 @@ CRITICAL RULES:
 
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`;
-          const res = await fetch(url, {
+          const res = await fetchWithTimeout(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -439,13 +461,21 @@ CRITICAL RULES:
           });
 
           if (!res.ok) {
+            let bodyMsg = '';
+            try {
+              const errJson = await res.clone().json();
+              bodyMsg = errJson?.error?.message || '';
+            } catch (parseErr) {}
+            geminiLastError = `[${model} ...${keyFp(apiKey)}] HTTP ${res.status}${bodyMsg ? ' - ' + bodyMsg : ''}`;
+
             if (res.status === 404) {
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
               warn(`Model "${model}" bulunamadı (404, anahtar ...${keyFp(apiKey)}) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
             } else {
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
+              warn(`Gemini hatası: ${geminiLastError}`);
             }
-            throw new Error(`HTTP ${res.status}`);
+            throw new Error(geminiLastError);
           }
 
           const json = await res.json();
@@ -480,6 +510,11 @@ CRITICAL RULES:
           return leftover;
         } catch (modelErr) {
           lastError = modelErr;
+          if (modelErr?.name === 'AbortError') {
+            geminiLastError = `[${model} ...${keyFp(apiKey)}] zaman aşımı (10sn içinde cevap gelmedi)`;
+          } else if (!geminiLastError || !geminiLastError.includes(model)) {
+            geminiLastError = `[${model} ...${keyFp(apiKey)}] ${modelErr?.message || modelErr}`;
+          }
         }
       }
     }
@@ -531,8 +566,25 @@ CRITICAL RULES:
       }
     };
   }
+  // GTX gets light concurrency (2 at a time); MyMemory - the most fragile
+  // free/anonymous quota of the three - is now fully serialized (1 at a
+  // time). On top of that, both are called in small PACED SUB-BATCHES (see
+  // below) instead of firing an entire song's worth of leftover lines at
+  // once, which is what was tripping both engines' anti-abuse limits
+  // within seconds in the old code.
   const gtxGate = makeConcurrencyGate(2, 220);
-  const mmGate = makeConcurrencyGate(2, 250);
+  const mmGate = makeConcurrencyGate(1, 300);
+
+  const GTX_CHUNK_SIZE = 4;
+  const GTX_CHUNK_PAUSE_MS = 650;
+  const MM_CHUNK_SIZE = 3;
+  const MM_CHUNK_PAUSE_MS = 1100;
+
+  function chunkArray(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
 
   async function translateWithGTXPerLine(linesToTranslate) {
     if (Date.now() < gtxGloballyDownUntil) {
@@ -541,52 +593,71 @@ CRITICAL RULES:
       return;
     }
 
-    await Promise.all(linesToTranslate.map(async (rawText) => {
-      await gtxGate.acquire();
-      try {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(normalizeForDumbEngines(rawText))}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
+    const chunks = chunkArray(linesToTranslate, GTX_CHUNK_SIZE);
 
-        let trLine = '';
-        let romaja = '';
-        if (Array.isArray(json[0])) {
-          json[0].forEach(item => {
-            if (item[0]) trLine += (trLine ? ' ' : '') + item[0];
-            if (item[3]) romaja += (romaja ? ' ' : '') + item[3];
-          });
-        }
-        trLine = trLine.trim();
-        romaja = romaja.trim();
-
-        if (trLine && normalize(trLine) !== normalize(rawText)) {
-          gtxConsecutiveFailures = 0;
-          gtxGloballyDownUntil = 0;
-          gtxBackoffStage = 0;
-          cache.set(rawText, {
-            tr: fixGluedWords(forcePerfectTurkish(trLine)),
-            romaja: isNonLatin(rawText) ? fixGluedWords(romaja) : ''
-          });
-        } else {
-          markFailed(rawText);
-        }
-      } catch (e) {
-        gtxConsecutiveFailures++;
-        if (gtxConsecutiveFailures >= 3 && gtxGloballyDownUntil <= Date.now()) {
-          const waitMs = GTX_BACKOFF_STEPS_MS[Math.min(gtxBackoffStage, GTX_BACKOFF_STEPS_MS.length - 1)];
-          warn(`GTX tekrar tekrar başarısız oluyor (muhtemelen rate-limit) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
-          gtxGloballyDownUntil = Date.now() + waitMs;
-          gtxBackoffStage++;
-        }
-        markFailed(rawText);
-      } finally {
-        gtxGate.release();
+    for (let ci = 0; ci < chunks.length; ci++) {
+      // An earlier sub-batch in this same call may have just tripped the
+      // backoff - stop dumping more requests on it and let the remaining
+      // lines fall through to MyMemory / next scan cycle instead.
+      if (Date.now() < gtxGloballyDownUntil) {
+        const remaining = Math.min(gtxGloballyDownUntil - Date.now(), 60000);
+        chunks.slice(ci).flat().forEach(t => markFailed(t, remaining));
+        break;
       }
-    }));
 
-    saveCache();
-    updateDOMWithCache();
+      await Promise.all(chunks[ci].map(async (rawText) => {
+        await gtxGate.acquire();
+        try {
+          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(normalizeForDumbEngines(rawText))}`;
+          const res = await fetchWithTimeout(url, {}, 10000);
+          if (!res.ok) {
+            gtxLastError = `HTTP ${res.status}`;
+            throw new Error(gtxLastError);
+          }
+          const json = await res.json();
+
+          let trLine = '';
+          let romaja = '';
+          if (Array.isArray(json[0])) {
+            json[0].forEach(item => {
+              if (item[0]) trLine += (trLine ? ' ' : '') + item[0];
+              if (item[3]) romaja += (romaja ? ' ' : '') + item[3];
+            });
+          }
+          trLine = trLine.trim();
+          romaja = romaja.trim();
+
+          if (trLine && normalize(trLine) !== normalize(rawText)) {
+            gtxConsecutiveFailures = 0;
+            gtxGloballyDownUntil = 0;
+            gtxBackoffStage = 0;
+            cache.set(rawText, {
+              tr: fixGluedWords(forcePerfectTurkish(trLine)),
+              romaja: isNonLatin(rawText) ? fixGluedWords(romaja) : ''
+            });
+          } else {
+            markFailed(rawText);
+          }
+        } catch (e) {
+          gtxLastError = e?.name === 'AbortError' ? 'zaman aşımı (10sn)' : (e?.message || String(e));
+          gtxConsecutiveFailures++;
+          if (gtxConsecutiveFailures >= 4 && gtxGloballyDownUntil <= Date.now()) {
+            const waitMs = GTX_BACKOFF_STEPS_MS[Math.min(gtxBackoffStage, GTX_BACKOFF_STEPS_MS.length - 1)];
+            warn(`GTX tekrar tekrar başarısız oluyor (${gtxLastError}) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
+            gtxGloballyDownUntil = Date.now() + waitMs;
+            gtxBackoffStage++;
+          }
+          markFailed(rawText);
+        } finally {
+          gtxGate.release();
+        }
+      }));
+
+      saveCache();
+      updateDOMWithCache();
+
+      if (ci < chunks.length - 1) await sleep(GTX_CHUNK_PAUSE_MS);
+    }
   }
 
   async function translateWithMyMemoryPerLine(linesToTranslate) {
@@ -596,58 +667,95 @@ CRITICAL RULES:
       return;
     }
 
-    await Promise.all(linesToTranslate.map(async (rawText) => {
-      await mmGate.acquire();
-      try {
-        const q = normalizeForDumbEngines(rawText).slice(0, 480);
-        const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=auto|tr`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
+    const chunks = chunkArray(linesToTranslate, MM_CHUNK_SIZE);
 
-        if (Number(json?.responseStatus) !== 200) {
-          throw new Error(json?.responseDetails || 'MyMemory kota/limit');
-        }
-
-        const trLine = (json?.responseData?.translatedText || '').trim();
-
-        if (trLine && normalize(trLine) !== normalize(rawText)) {
-          mmConsecutiveFailures = 0;
-          mmGloballyDownUntil = 0;
-          mmBackoffStage = 0;
-          const existing = cache.get(rawText) || {};
-          cache.set(rawText, {
-            tr: fixGluedWords(forcePerfectTurkish(trLine)),
-            romaja: existing.romaja || ''
-          });
-        } else {
-          markFailed(rawText);
-        }
-      } catch (e) {
-        mmConsecutiveFailures++;
-        if (mmConsecutiveFailures >= 3 && mmGloballyDownUntil <= Date.now()) {
-          const waitMs = MM_BACKOFF_STEPS_MS[Math.min(mmBackoffStage, MM_BACKOFF_STEPS_MS.length - 1)];
-          warn(`MyMemory tekrar tekrar başarısız oluyor (muhtemelen rate-limit) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
-          mmGloballyDownUntil = Date.now() + waitMs;
-          mmBackoffStage++;
-        }
-        markFailed(rawText);
-      } finally {
-        mmGate.release();
+    for (let ci = 0; ci < chunks.length; ci++) {
+      if (Date.now() < mmGloballyDownUntil) {
+        const remaining = Math.min(mmGloballyDownUntil - Date.now(), 60000);
+        chunks.slice(ci).flat().forEach(t => markFailed(t, remaining));
+        break;
       }
-    }));
 
-    saveCache();
-    updateDOMWithCache();
+      await Promise.all(chunks[ci].map(async (rawText) => {
+        await mmGate.acquire();
+        try {
+          const q = normalizeForDumbEngines(rawText).slice(0, 480);
+          const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=auto|tr`;
+          const res = await fetchWithTimeout(url, {}, 10000);
+          if (!res.ok) {
+            mmLastError = `HTTP ${res.status}`;
+            throw new Error(mmLastError);
+          }
+          const json = await res.json();
+
+          if (Number(json?.responseStatus) !== 200) {
+            mmLastError = json?.responseDetails || 'MyMemory kota/limit';
+            throw new Error(mmLastError);
+          }
+
+          const trLine = (json?.responseData?.translatedText || '').trim();
+
+          if (trLine && normalize(trLine) !== normalize(rawText)) {
+            mmConsecutiveFailures = 0;
+            mmGloballyDownUntil = 0;
+            mmBackoffStage = 0;
+            const existing = cache.get(rawText) || {};
+            cache.set(rawText, {
+              tr: fixGluedWords(forcePerfectTurkish(trLine)),
+              romaja: existing.romaja || ''
+            });
+          } else {
+            markFailed(rawText);
+          }
+        } catch (e) {
+          mmLastError = e?.name === 'AbortError' ? 'zaman aşımı (10sn)' : (mmLastError || e?.message || String(e));
+          mmConsecutiveFailures++;
+          if (mmConsecutiveFailures >= 4 && mmGloballyDownUntil <= Date.now()) {
+            const waitMs = MM_BACKOFF_STEPS_MS[Math.min(mmBackoffStage, MM_BACKOFF_STEPS_MS.length - 1)];
+            warn(`MyMemory tekrar tekrar başarısız oluyor (${mmLastError}) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
+            mmGloballyDownUntil = Date.now() + waitMs;
+            mmBackoffStage++;
+          }
+          markFailed(rawText);
+        } finally {
+          mmGate.release();
+        }
+      }));
+
+      saveCache();
+      updateDOMWithCache();
+
+      if (ci < chunks.length - 1) await sleep(MM_CHUNK_PAUSE_MS);
+    }
   }
 
-  async function processQueue(allVisibleLines) {
+  // Reorders a subset of lines so that whatever is at/after the currently
+  // playing line comes first, and already-passed lines come last. This is
+  // what stops a mid-queue rate limit from leaving the lines you're about
+  // to hear blank while lines from the start of the song (already missed)
+  // get translated first just because they happened to be earlier in the
+  // DOM order.
+  function prioritizeByActive(lines, allOrdered, activeText) {
+    if (!activeText) return lines;
+    const activeIdx = allOrdered.indexOf(activeText);
+    if (activeIdx === -1) return lines;
+    const ahead = [];
+    const behind = [];
+    lines.forEach(l => {
+      const idx = allOrdered.indexOf(l);
+      if (idx === -1 || idx >= activeIdx) ahead.push(l); else behind.push(l);
+    });
+    return ahead.concat(behind);
+  }
+
+  async function processQueue(allVisibleLines, activeText) {
     const now = Date.now();
-    const missing = allVisibleLines.filter(t =>
+    let missing = allVisibleLines.filter(t =>
       !cache.has(t) && !inFlight.has(t) && (failedUntil.get(t) || 0) <= now
     );
     if (missing.length === 0) return;
 
+    missing = prioritizeByActive(missing, allVisibleLines, activeText);
     missing.forEach(t => inFlight.add(t));
 
     try {
@@ -670,13 +778,14 @@ CRITICAL RULES:
         }
 
         if (leftover && leftover.length > 0 && Date.now() >= gtxGloballyDownUntil) {
-          await translateWithGTXPerLine(leftover);
+          await translateWithGTXPerLine(prioritizeByActive(leftover, allVisibleLines, activeText));
         }
 
-        const stillMissing = group.filter(l => {
+        let stillMissing = group.filter(l => {
           const c = cache.get(l);
           return !c || !c.tr;
         });
+        stillMissing = prioritizeByActive(stillMissing, allVisibleLines, activeText);
         if (stillMissing.length > 0 && Date.now() >= mmGloballyDownUntil) {
           await translateWithMyMemoryPerLine(stillMissing);
         }
@@ -702,16 +811,23 @@ CRITICAL RULES:
 
     if (allDown) {
       const waitSec = Math.max(0, Math.round((Math.max(geminiGloballyDownUntil, gtxGloballyDownUntil, mmGloballyDownUntil) - now) / 1000));
-      btn.title = `Tüm çeviri motorları (Gemini + Google Translate + MyMemory) şu anda geçici olarak kullanılamıyor (muhtemelen rate-limit) - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
+      const reasons = [
+        hasKeys && geminiLastError ? `Gemini: ${geminiLastError}` : null,
+        gtxLastError ? `Translate: ${gtxLastError}` : null,
+        mmLastError ? `MyMemory: ${mmLastError}` : null
+      ].filter(Boolean).join(' | ');
+      btn.title = `Tüm çeviri motorları şu anda kullanılamıyor - ${reasons || 'sebep henüz kaydedilmedi'} - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
     } else if (geminiDown && (gtxDown || mmDown)) {
-      btn.title = 'Gemini anahtarlarının tamamı şu anda kota/limit sınırında, kalan yedek motorla devam ediliyor';
+      btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'kota/limit'}), kalan yedek motorla devam ediliyor`;
     } else if (geminiDown) {
-      btn.title = 'Gemini anahtarlarının tamamı şu anda kota/limit sınırında - geçici olarak sadece yedek (ücretsiz) motorlar kullanılıyor';
+      btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'kota/limit'}) - geçici olarak sadece yedek (ücretsiz) motorlar kullanılıyor`;
     } else if (gtxDown || mmDown) {
-      btn.title = `${gtxDown ? 'Google Translate' : 'MyMemory'} şu anda geçici olarak kullanılamıyor (rate-limit) - diğer motorlar devrede`;
+      const which = gtxDown ? 'Google Translate' : 'MyMemory';
+      const reason = gtxDown ? gtxLastError : mmLastError;
+      btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V37 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: düzenle, Shift+sağ tık: cache'i de sıfırla)`
+        ? `God Mode V38 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: düzenle, Shift+sağ tık: cache'i de sıfırla)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -746,7 +862,7 @@ CRITICAL RULES:
       e.preventDefault();
       try {
         const currentValue = geminiApiKeys.join(', ');
-        const input = prompt('🌟 Spicy Lyrics V37 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, 2-3 anahtar = 2-3x kota):', currentValue);
+        const input = prompt('🌟 Spicy Lyrics V38 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, 2-3 anahtar = 2-3x kota):', currentValue);
         if (input === null) return;
 
         geminiApiKeys = Array.from(new Set(
@@ -754,9 +870,9 @@ CRITICAL RULES:
         ));
         try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
 
-        geminiGloballyDownUntil = 0; geminiBackoffStage = 0;
-        gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0;
-        mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0;
+        geminiGloballyDownUntil = 0; geminiBackoffStage = 0; geminiLastError = '';
+        gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0; gtxLastError = '';
+        mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0; mmLastError = '';
         deadModels.clear();
         failedUntil.clear();
 
@@ -782,6 +898,7 @@ CRITICAL RULES:
     const lineEls = Array.from(document.querySelectorAll('#SpicyLyricsPage .line:not(.musical-line)'));
     const allVisibleTexts = [];
     let hasMissing = false;
+    let activeText = null;
 
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
@@ -789,6 +906,10 @@ CRITICAL RULES:
 
       if (!allVisibleTexts.includes(text)) {
         allVisibleTexts.push(text);
+      }
+
+      if (lineEl.classList.contains('Active') && !activeText) {
+        activeText = text;
       }
 
       if (cache.has(text)) {
@@ -803,7 +924,7 @@ CRITICAL RULES:
     if (hasMissing && allVisibleTexts.length > 0) {
       clearTimeout(batchTimer);
       batchTimer = setTimeout(() => {
-        processQueue(allVisibleTexts);
+        processQueue(allVisibleTexts, activeText);
       }, 50);
     }
   }
