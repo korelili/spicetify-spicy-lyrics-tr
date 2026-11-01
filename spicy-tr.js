@@ -1,87 +1,63 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 35.0.0 (Structured JSON Output + Smarter Model Fallback)
+// VERSION: 36.0.0 (No More Cache Wipes + Multi-Key Rotation + 3rd Fallback Engine)
 //
-// PREVIOUS HISTORY (condensed): V20-V33 fixed CSS bleed-through on the
-// lyrics page, song-change/seek detection, persistent localStorage
-// caching, and the core "never leave a line untranslated" + ad-lib rules.
-// V34.x fixed: whole-song batch translation replacing small blind chunks
-// (so Gemini has real context and needs ~1 call/song instead of 3-6), a
-// per-line GTX fallback so one misaligned GTX response can't shift every
-// line after it, exponential backoff for both Gemini and GTX instead of
-// hammering a dead quota on a fixed timer, several confirmed sizli/bizli
-// (formal "siz") leaks in the regex net, a glued-words-with-no-space
-// safety net, and a manual-reset button that could silently fail to
-// rescan if Spicy Lyrics' own DOM hadn't finished swapping songs yet.
+// PREVIOUS HISTORY (condensed): V20-V33 fixed CSS bleed-through, song-change
+// and seek detection, persistent localStorage caching, and the core "never
+// leave a line untranslated" + ad-lib rules. V34.x moved to whole-song
+// batch translation with per-line GTX fallback and exponential backoff for
+// both engines instead of hammering a dead quota. V35 replaced the fragile
+// "SRC:/ROM:/TR:/---" text block + fuzzy text-matching with native JSON
+// structured output mapped back to lines by position, turned off Gemini's
+// default "thinking" (it was silently eating the output-token budget and
+// could truncate long songs), raised the output cap to the models' real
+// ceiling, and added gemini-2.5-flash-lite as a high-quota fallback model.
 //
-// V35 - WHAT CHANGED AND WHY:
+// V36 - WHAT CHANGED AND WHY (direct response to real-world reports):
 //
-// 1) ROOT-CAUSE FIX for "satır kayıyor / atlıyor / birbirine yapışıyor":
-//    V34 asked Gemini for a custom "SRC:/ROM:/TR:/---" text block per line,
-//    then had to fuzzy-match each returned SRC back to the original line
-//    (exact match -> punctuation-insensitive match -> substring match) to
-//    survive Gemini slightly rewording its own echo. That fuzzy matching
-//    was itself a risk on songs with several short, near-identical lines.
-//    V35 instead uses the API's native structured JSON output
-//    (responseSchema: one {rom, tr} object per line, in the exact order
-//    asked) and maps results back by POSITION, not by re-matching text. If
-//    the array Gemini returns isn't exactly the right length, the whole
-//    chunk is treated as a miss and falls straight through to the per-line
-//    GTX fallback - no guessing, no partial/misaligned cache writes. This
-//    deletes the old SRC-matching code entirely and is structurally immune
-//    to the "glued/shifted/reworded SRC" failure class the old text-block
-//    format kept needing new patches for.
+// 1) STOPPED WIPING THE TRANSLATION CACHE ON VERSION/KEY CHANGES. V35
+//    bumped the cache storage key (to avoid mixing old/new translation
+//    style) and the "edit API key" button ALSO wiped the cache as part of
+//    its "unstick everything" reset. In practice this meant: the first
+//    time V35 loaded, every previously-cached line across every song
+//    became a cache miss at once, and simply opening the key-edit prompt
+//    to add a key did the same thing again - both cause a sudden burst of
+//    API calls that can exhaust a free key's daily quota in minutes
+//    instead of the hours it would normally take, which is almost
+//    certainly why translation can appear to "just stop" right after
+//    editing the key or updating the script. V36 keeps the SAME cache
+//    storage key as V35 (do not bump this casually in a future patch -
+//    see above) and the key-edit prompt no longer touches the cache at
+//    all, only backoff timers get reset (cheap, no data loss). A full
+//    cache wipe is still available on purpose (Shift+right-click) for
+//    when one is actually needed.
 //
-// 2) TRUNCATION: "thinking" was never explicitly turned off, and Gemini
-//    2.5/3.x Flash models think by default - those invisible reasoning
-//    tokens count against the same output budget as the visible
-//    translation, so on a long/dense song the real translation text could
-//    get cut off before every line was written, with no obvious error (it
-//    would just look like "half the song is missing", same symptom as the
-//    34.2 bug but a different cause). V35 sets thinkingConfig.thinkingBudget
-//    = 0 (this is a short translation task, not a reasoning task) and
-//    raises the output cap from 8192 to the models' real 65536-token
-//    ceiling, so the JSON array always has room to finish. This also makes
-//    every call noticeably faster.
+// 2) MULTIPLE GEMINI API KEYS: the key-edit prompt now accepts several
+//    comma-separated keys. Each free Google account/key has its own
+//    separate daily quota, so two or three keys together are two or three
+//    times the effective free-tier headroom. Tried best-model-first across
+//    every key before ever dropping to a lower-tier model.
 //
-// 3) MODEL LIST: replaced the unversioned "gemini-flash-latest" alias
-//    (unclear whether that alias still resolves the way it used to) with
-//    Google's current, explicitly documented stable model IDs, and added
-//    gemini-2.5-flash-lite, which currently carries by far the most
-//    generous free-tier daily quota of the four. It's tried LAST, after
-//    the higher-quality models, purely as the high-headroom safety net
-//    that keeps translation alive once the others are rate-limited for
-//    the day - the most direct lever available for "10-15 şarkıdan sonra
-//    çeviri komple duruyor" on a free key.
+// 3) THIRD FALLBACK ENGINE: added MyMemory (api.mymemory.translated.net,
+//    no key required, independent rate-limit pool from Google Translate)
+//    behind GTX. It has no romanization output of its own, so it only
+//    fills in the Turkish line, not the romaja line - but it's one more
+//    independent chance at a result, and it means Gemini and GTX both
+//    being rate-limited at the same moment no longer stops translation
+//    outright.
 //
-// 4) DEAD-MODEL COOLDOWN: a model that returns 404 (wrong/retired model
-//    id) used to get the same 60s cooldown as a transient rate-limit error
-//    - meaning a single bad model id would get silently re-tried, and
-//    silently fail, on every single song forever. A 404 now gets a 6-hour
-//    cooldown instead, so a stale/invalid id stops wasting a slot in the
-//    per-call fallback chain almost immediately.
-//
-// 5) PERFORMANCE: the MutationObserver has to watch the whole page body to
-//    reliably catch Spicy Lyrics mounting/updating, which meant every
-//    unrelated Spotify UI update (progress bar, hover states, queue
-//    changes) was triggering an immediate full lyric-line rescan. Scans
-//    triggered by the observer/scroll listener now collapse into one per
-//    ~80ms instead of firing on every single mutation; the deliberate
-//    multi-stage rescan after a song change or seek is untouched.
-//
-// HONESTY NOTES (still true, unchanged from V34): this script cannot
-// itself verify that Chinese/Japanese/Thai romanization is linguistically
-// correct - it knows no more about those languages than the engine it
-// calls. And it cannot invent free quota Google hasn't granted the key -
-// gemini-2.5-flash-lite's bigger allowance buys real extra headroom, but a
-// listener doing many hours of song-switching on one free key can still
-// eventually hit a wall for the day; a paid key removes that ceiling.
+// HONESTY NOTE: none of this invents quota Google/MyMemory haven't
+// granted - it reduces how much of it the tool itself was burning
+// needlessly, and spreads real usage across more independent pools. On a
+// single free key with heavy same-session listening, you can still
+// eventually hit a wall for the day; more keys and the 3rd engine push
+// that wall a lot further out, they don't remove it.
 
-(function spicyTurkishProV35() {
+(function spicyTurkishProV36() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V35]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V35]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V35]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V36]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V36]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V36]', 'color:#ff4b4b;font-weight:bold', ...args); };
 
   [
     'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
@@ -89,12 +65,15 @@
     'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26',
     'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28', 'spicy_tr_godmode_v29',
     'spicy_tr_godmode_v30', 'spicy_tr_godmode_v31', 'spicy_tr_godmode_v32',
-    'spicy_tr_godmode_v33', 'spicy_tr_godmode_v34', 'spicy_tr_godmode_v34_1'
+    'spicy_tr_godmode_v33', 'spicy_tr_godmode_v34'
+    // NOTE: 'spicy_tr_godmode_v34_1' and 'spicy_tr_godmode_v35' are
+    // deliberately NOT in this list. V35 already consumed v34_1 once; V36
+    // intentionally keeps reading/writing the SAME key V35 used
+    // (STORAGE_CACHE_KEY below) instead of rotating to a new one, so nobody
+    // loses a cache again just from updating the script. Only bump this key
+    // if the cached DATA SHAPE itself changes, never just to "freshen" it.
   ].forEach(k => localStorage.removeItem(k));
 
-  // Bumped from v34_1: translation quality/shape changed enough (structured
-  // JSON output, thinking off) that old cached lines are worth refreshing
-  // rather than mixing old and new style translations in the same song.
   const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v35';
   let savedCache = {};
   try {
@@ -107,11 +86,11 @@
   const inFlight = new Set();
   const failedUntil = new Map(); // rawText -> timestamp; don't retry before this
   const FAILURE_COOLDOWN_MS = 12000;
-  const deadModels = new Map();
-  const MODEL_DEAD_SHORT_MS = 60000;          // transient error (rate limit, 5xx)
+  const deadModels = new Map(); // "<keyFingerprint>::<model>" -> cooldown timestamp
+  const MODEL_DEAD_SHORT_MS = 60000;            // transient error (rate limit, 5xx)
   const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000; // 404 = wrong/retired model id
 
-  // Exponential backoff state for Gemini (resets to stage 0 on any success)
+  // Exponential backoff state for Gemini as a whole (resets on any success)
   const GEMINI_BACKOFF_STEPS_MS = [60000, 120000, 300000, 600000]; // 1m,2m,5m,10m
   let geminiGloballyDownUntil = 0;
   let geminiBackoffStage = 0;
@@ -122,9 +101,34 @@
   let gtxBackoffStage = 0;
   let gtxConsecutiveFailures = 0;
 
+  // Exponential backoff state for MyMemory (same shape as GTX, independent)
+  const MM_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000];
+  let mmGloballyDownUntil = 0;
+  let mmBackoffStage = 0;
+  let mmConsecutiveFailures = 0;
+
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
-  let geminiApiKey = localStorage.getItem('spicy_tr_gemini_key') || '';
   let batchTimer = null;
+
+  // --- Gemini API keys: supports one or many, comma/newline separated ---
+  const GEMINI_KEYS_STORAGE = 'spicy_tr_gemini_keys';
+  function keyFp(key) {
+    return (key || '').trim().slice(-6);
+  }
+  let geminiApiKeys = [];
+  try {
+    const storedKeys = JSON.parse(localStorage.getItem(GEMINI_KEYS_STORAGE) || '[]');
+    if (Array.isArray(storedKeys)) {
+      geminiApiKeys = storedKeys.filter(k => typeof k === 'string' && k.trim().length > 10);
+    }
+  } catch (e) {}
+  // One-time migration from the old single-key format (pre-V36).
+  const legacyKey = localStorage.getItem('spicy_tr_gemini_key');
+  if (legacyKey && legacyKey.trim().length > 10 && !geminiApiKeys.includes(legacyKey.trim())) {
+    geminiApiKeys.push(legacyKey.trim());
+    try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e) {}
+  }
+  localStorage.removeItem('spicy_tr_gemini_key');
 
   // A whole typical song (verses+chorus+bridge, de-duplicated) almost always
   // fits under this in one Gemini call. If a song has more unique lines than
@@ -133,10 +137,9 @@
   // unusually long songs.
   const MAX_LINES_PER_GEMINI_CALL = 50;
   // Real ceiling for all four models below is 65536 output tokens. With
-  // thinking turned off (see GEMINI_MODELS call site), every one of those
-  // tokens goes to the actual JSON translation instead of invisible
-  // reasoning, so this is comfortably more than even a 50-line/call batch
-  // needs - the goal here is "never truncate", not "always use this much".
+  // thinking turned off, every one of those tokens goes to the actual JSON
+  // translation instead of invisible reasoning, so this is comfortably more
+  // than even a 50-line/call batch needs - the goal is "never truncate".
   const GEMINI_MAX_OUTPUT_TOKENS = 65536;
 
   function markFailed(text, cooldownMs) {
@@ -232,11 +235,10 @@
   }
 
   // Safety net for the "words glued together with no space" pattern seen in
-  // real output (romanization AND, occasionally, the Turkish line itself -
-  // e.g. "hamkkelamyeonSayyeah", "Justdaily'dir", "şovuŞimdi"). The prompt
-  // demands spacing and JSON output removes one whole class of join-related
-  // glue bugs, but a single string field can still come back glued if the
-  // model itself drops a space - this catches that regardless of source.
+  // real output (romanization AND, occasionally, the Turkish line itself).
+  // JSON output removed one whole class of join-related glue bugs, but a
+  // single string field can still come back glued if the model itself drops
+  // a space - this catches that regardless of source.
   function fixGluedWords(s) {
     if (!s) return s;
     return s.replace(/([a-zçğıöşü0-9])([A-ZÇĞİÖŞÜ])/g, '$1 $2');
@@ -252,7 +254,6 @@
     if (!text) return '';
     let t = text.trim();
 
-    // Simple whole-word formal -> informal swaps confirmed from real output.
     t = t.replace(/\bVücudunuz\b/gi, 'Vücudun')
          .replace(/\bbelirtin\b/gi, 'söyle')
          .replace(/\bGözleriniz\b/gi, 'Gözlerin')
@@ -268,16 +269,8 @@
          .replace(/\bBebek\b/gi, 'Bebeğim')
          .replace(/Rap boku/gi, 'Rap');
 
-    // Bare "Siz" as its own word is unambiguous - always safe to informalize.
     t = t.replace(/\bSiz\b/gi, 'Sen');
 
-    // Possessive/case-marked NOUNS with a formal "-nİz-" plus a FURTHER case
-    // ending are safe to informalize: an imperative VERB never takes a
-    // further case suffix (the imperative is already the final word form),
-    // so this shape can only be a noun possessive, e.g. "düğmelerinizi" ->
-    // "düğmelerini", "Kalbinize" -> "Kalbine". The bare "-nİz" ending with
-    // NOTHING after it is left alone on purpose (that's the ambiguous case -
-    // could be a noun or an imperative, can't tell safely with a regex).
     t = t.replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inize\b/g, '$1ine')
          .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınıza\b/g, '$1ına')
          .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüze\b/g, '$1üne')
@@ -303,14 +296,11 @@
          .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzle\b/g, '$1ünle')
          .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzla\b/g, '$1unla');
 
-    // Question-particle forms: unambiguous, never a noun or a bare
-    // imperative - safe. "biliyor musunuz" -> "biliyor musun"
     t = t.replace(/\bmusunuz\b/gi, 'musun')
          .replace(/\bmüsünüz\b/gi, 'müsün')
          .replace(/\bmısınız\b/gi, 'mısın')
          .replace(/\bmisiniz\b/gi, 'misin');
 
-    // A handful of exact formal verb phrases confirmed from real output.
     t = t.replace(/\bdevam edin\b/gi, 'devam et')
          .replace(/\bgevşetin\b/gi, 'gevşet')
          .replace(/\bkeşfedin\b/gi, 'keşfet')
@@ -373,8 +363,6 @@
   // match" failure class: there is nothing left to misalign.
   function parseGeminiJsonArray(rawOutput, expectedCount) {
     if (!rawOutput) return null;
-    // Defensive only: responseMimeType forces raw JSON, but strip a stray
-    // ```json fence just in case a model wraps it anyway.
     const cleaned = rawOutput.trim().replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/i, '');
     let parsed;
     try {
@@ -390,9 +378,7 @@
   // LAST on purpose: it currently has the most generous free-tier daily
   // quota of the four, so it's the high-headroom fallback that keeps
   // translation alive once the others are rate-limited for the day, not
-  // the first choice for quality. "gemini-flash-latest" (an unversioned
-  // alias) was dropped in favor of these explicit, currently-documented
-  // model IDs so a single ambiguous alias can't quietly dead-end a call.
+  // the first choice for quality.
   const GEMINI_MODELS = [
     'gemini-2.5-flash',
     'gemini-3-flash-preview',
@@ -424,113 +410,113 @@ CRITICAL RULES:
    WRONG (formal - never output anything like this): "Ters çevirin", "gevşetin", "keşfedin", "devam edin", "Kalbinize", "düğmelerinizi", "yerlerinizi", "Siz farkına bile varmadan", "görüş alanınızdadır"
    RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır"
 2. NO LINE SKIP OR SHIFT: your JSON array MUST contain exactly ${chunkLines.length} objects, one per numbered line above, in the exact same order - including lines that are already in English, already seem simple/understandable, or match the song's title. Never leave a line as-is just because it "already makes sense" - every line gets its own real Turkish translation.
-3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word (never turn "On&on&on&on" into something like "Açık&açık&açık" by translating "on" as the on/off switch word) - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
-3b. FEELING OVER LITERAL WORDS: you are localizing a song for a Turkish listener to FEEL, not producing a dictionary crib. Prefer the natural way a Turkish songwriter/poet would phrase the same image over a flat word-for-word rendering - e.g. for an intensified color/quality, prefer Turkish's own reduplicated intensifiers where they fit naturally ("masmavi" rather than "çok mavi" for a vivid blue sky, "bembeyaz" rather than "çok beyaz", "güpegündüz" for broad daylight), and generally favor an evocative, idiomatic phrase over a technically-accurate-but-stiff one, as long as the core meaning is preserved.
-3c. TITLE / HOOK LINES: a line that IS or closely matches the song's own title (given above as "Song:"), or a repeated stylized hook built from mixed fragments (e.g. a line like "Fly By Day Viva California Time" that isn't really one grammatical sentence), will not translate sensibly word-for-word. For these, don't force a literal clause-by-clause translation - give a short, natural-sounding Turkish phrase that captures the vibe/mood of the hook instead, the way a Turkish cover or localized title would read, even if it's a looser rendering than a normal lyric line would get.
-4. ROMANIZATION IS MANDATORY for every line not already in Latin script - NEVER leave "rom" empty for Korean, Japanese, Chinese, Thai, or any other non-Latin script, even when a perfectly clean version is hard to produce. Always give your best simple phonetic attempt instead of skipping it - an imperfect romanization is always better than none. (Only use an empty string for "rom" when the line is ALREADY in Latin script, e.g. English/Turkish - never as a way to avoid a hard case.)
-   STYLE: keep it casual and readable, the way an ordinary person types out pronunciation online. Standard single accent marks from an established system are fine (e.g. Chinese Hanyu Pinyin tone marks like ā/í/ǒ/ù). AVOID heavy academic/IAST-style transliteration with multiple stacked diacritics per letter - simplify to plain, easy-to-read Latin spelling instead.
-   SPACING IS MANDATORY: always put a space between romanized WORDS exactly the way the original line's words are separated - never concatenate several words into one unbroken string. Example: for a line meaning "together, say yeah", write "hamkke hamyeon say yeah", NEVER "hamkkehamyeonsayyeah".
+3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
+3b. FEELING OVER LITERAL WORDS: you are localizing a song for a Turkish listener to FEEL, not producing a dictionary crib. Prefer the natural way a Turkish songwriter/poet would phrase the same image over a flat word-for-word rendering - e.g. for an intensified color/quality, prefer Turkish's own reduplicated intensifiers where they fit naturally ("masmavi" rather than "çok mavi", "bembeyaz" rather than "çok beyaz", "güpegündüz" for broad daylight), and generally favor an evocative, idiomatic phrase over a technically-accurate-but-stiff one, as long as the core meaning is preserved.
+3c. TITLE / HOOK LINES: a line that IS or closely matches the song's own title (given above as "Song:"), or a repeated stylized hook built from mixed fragments, will not translate sensibly word-for-word. For these, give a short, natural-sounding Turkish phrase that captures the vibe/mood of the hook instead, the way a Turkish cover or localized title would read.
+4. ROMANIZATION IS MANDATORY for every line not already in Latin script - NEVER leave "rom" empty for Korean, Japanese, Chinese, Thai, or any other non-Latin script, even when a perfectly clean version is hard to produce. Always give your best simple phonetic attempt instead of skipping it. (Only use an empty string for "rom" when the line is ALREADY in Latin script.)
+   STYLE: keep it casual and readable, the way an ordinary person types out pronunciation online. Standard single accent marks from an established system are fine. AVOID heavy academic/IAST-style transliteration with multiple stacked diacritics per letter.
+   SPACING IS MANDATORY: always put a space between romanized WORDS exactly the way the original line's words are separated - never concatenate several words into one unbroken string.
 5. OUTPUT FORMAT: respond with ONLY a JSON array matching the given schema - exactly ${chunkLines.length} objects, in the same order as the numbered lines above. Each object has "rom" (romanization, or "" if the line is already Latin script) and "tr" (the natural Turkish translation using informal "sen", per rule 1). No extra text, no markdown, no numbering in the output - just the array.`;
 
-    let lastError = new Error('Tüm Gemini modelleri şu an soğuma süresinde veya kullanılamıyor');
-    let anyModelAttempted = false;
+    let lastError = new Error('Tüm Gemini anahtar/model kombinasyonları şu an soğuma süresinde veya kullanılamıyor');
 
+    // Model-outer, key-inner: tries the best model across every configured
+    // key before ever dropping to a lower-tier model. This both reaches a
+    // working combo faster when one key is simply exhausted for the day,
+    // and keeps translation quality as high as possible for as long as
+    // possible across however many keys are configured.
     for (const model of GEMINI_MODELS) {
-      if ((deadModels.get(model) || 0) > Date.now()) continue;
-      anyModelAttempted = true;
+      for (const apiKey of geminiApiKeys) {
+        const comboKey = `${keyFp(apiKey)}::${model}`;
+        if ((deadModels.get(comboKey) || 0) > Date.now()) continue;
 
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey.trim()}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.2,
-              maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-              // Pure translation doesn't need multi-step reasoning, and
-              // leaving thinking on silently eats into the same output
-              // budget as the visible JSON answer (see V35 changelog #2).
-              thinkingConfig: { thinkingBudget: 0 },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: 'ARRAY',
-                items: {
-                  type: 'OBJECT',
-                  properties: {
-                    rom: { type: 'STRING' },
-                    tr: { type: 'STRING' }
-                  },
-                  required: ['tr']
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.2,
+                maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+                thinkingConfig: { thinkingBudget: 0 },
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: 'ARRAY',
+                  items: {
+                    type: 'OBJECT',
+                    properties: {
+                      rom: { type: 'STRING' },
+                      tr: { type: 'STRING' }
+                    },
+                    required: ['tr']
+                  }
                 }
               }
+            })
+          });
+
+          if (!res.ok) {
+            if (res.status === 404) {
+              deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
+              warn(`Model "${model}" bulunamadı (404, anahtar ...${keyFp(apiKey)}) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
+            } else {
+              deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
             }
-          })
-        });
-
-        if (!res.ok) {
-          if (res.status === 404) {
-            deadModels.set(model, Date.now() + MODEL_DEAD_LONG_MS);
-            warn(`Model "${model}" bulunamadı (404) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
-          } else {
-            deadModels.set(model, Date.now() + MODEL_DEAD_SHORT_MS);
+            throw new Error(`HTTP ${res.status}`);
           }
-          throw new Error(`HTTP ${res.status}`);
+
+          const json = await res.json();
+          const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          const parsed = parseGeminiJsonArray(rawOutput, chunkLines.length);
+
+          if (!parsed) throw new Error('JSON eksik/satır sayısı uyuşmuyor');
+
+          chunkLines.forEach((rawLine, i) => {
+            const item = parsed[i] || {};
+            const trRaw = (item.tr || '').trim();
+            if (!trRaw) return; // left unmatched -> falls through to GTX/MyMemory
+
+            const cleanTr = fixGluedWords(forcePerfectTurkish(trRaw));
+
+            // If Gemini just echoed the line back untranslated, DON'T cache
+            // it - that would mark the line "done" forever while rendering
+            // nothing, permanently hiding it. Leave it unmatched so it
+            // falls through to the fallback engines below.
+            if (normalize(cleanTr) === normalize(rawLine)) return;
+
+            const cleanRom = isNonLatin(rawLine) ? fixGluedWords((item.rom || '').trim()) : '';
+            cache.set(rawLine, { tr: cleanTr, romaja: cleanRom });
+          });
+
+          saveCache();
+          updateDOMWithCache();
+
+          geminiGloballyDownUntil = 0; // it just worked, so Gemini is clearly back
+          geminiBackoffStage = 0;
+
+          const leftover = chunkLines.filter(l => {
+            const c = cache.get(l);
+            return !c || !c.tr;
+          });
+          return leftover;
+        } catch (modelErr) {
+          lastError = modelErr;
         }
-
-        const json = await res.json();
-        const rawOutput = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const parsed = parseGeminiJsonArray(rawOutput, chunkLines.length);
-
-        if (!parsed) throw new Error('JSON eksik/satır sayısı uyuşmuyor');
-
-        chunkLines.forEach((rawLine, i) => {
-          const item = parsed[i] || {};
-          const trRaw = (item.tr || '').trim();
-          if (!trRaw) return; // left unmatched -> falls through to GTX below
-
-          const cleanTr = fixGluedWords(forcePerfectTurkish(trRaw));
-
-          // If Gemini just echoed the line back untranslated (happens
-          // occasionally on simple/already-English lines despite the
-          // explicit rule against it), DON'T cache it - that would mark
-          // the line "done" forever while rendering nothing (renderSubtitles
-          // hides a translation identical to the source), permanently
-          // hiding it. Leave it unmatched so it falls through to the GTX
-          // retry below, which usually succeeds with a real translation.
-          if (normalize(cleanTr) === normalize(rawLine)) return;
-
-          const cleanRom = isNonLatin(rawLine) ? fixGluedWords((item.rom || '').trim()) : '';
-          cache.set(rawLine, { tr: cleanTr, romaja: cleanRom });
-        });
-
-        saveCache();
-        updateDOMWithCache();
-
-        geminiGloballyDownUntil = 0; // it just worked, so Gemini is clearly back
-        geminiBackoffStage = 0;
-
-        // Any line Gemini didn't give us a confident result for falls
-        // straight through to the GTX fallback in processQueue - same
-        // cycle, not after a stall.
-        const leftover = chunkLines.filter(l => {
-          const c = cache.get(l);
-          return !c || !c.tr;
-        });
-        return leftover;
-      } catch (modelErr) {
-        lastError = modelErr;
       }
     }
 
-    // Every model was either on cooldown or just failed - back off with
-    // growing delays instead of hammering a dead/quota-exhausted key every
-    // fixed interval.
-    if (!anyModelAttempted || GEMINI_MODELS.every(m => (deadModels.get(m) || 0) > Date.now())) {
+    // Every key x model combo was either on cooldown or just failed - back
+    // off with growing delays instead of hammering dead/quota-exhausted
+    // keys every fixed interval.
+    const allCombosDead = geminiApiKeys.length === 0 ||
+      GEMINI_MODELS.every(model => geminiApiKeys.every(apiKey => (deadModels.get(`${keyFp(apiKey)}::${model}`) || 0) > Date.now()));
+
+    if (allCombosDead) {
       const waitMs = GEMINI_BACKOFF_STEPS_MS[Math.min(geminiBackoffStage, GEMINI_BACKOFF_STEPS_MS.length - 1)];
       if (geminiGloballyDownUntil <= Date.now()) {
-        warn(`Tüm Gemini modelleri kullanılamıyor (kota/limit olabilir) - GTX motoruna geçiliyor, ${Math.round(waitMs / 1000)}sn sonra Gemini tekrar denenecek`);
+        warn(`Tüm Gemini anahtar/model kombinasyonları kullanılamıyor (kota/limit olabilir) - yedek motorlara geçiliyor, ${Math.round(waitMs / 1000)}sn sonra Gemini tekrar denenecek`);
       }
       geminiGloballyDownUntil = Date.now() + waitMs;
       geminiBackoffStage++;
@@ -541,71 +527,60 @@ CRITICAL RULES:
 
   // GTX (Google Translate) has no song context and is known to badly
   // mistranslate a handful of very common rap/hip-hop slang words when they
-  // appear with no surrounding context - a well-known Google Translate
-  // quirk, not something we can prompt our way out of since GTX isn't an
-  // LLM. Gemini already handles this correctly (context + instructions), so
-  // this normalization ONLY applies to text sent to GTX, never to Gemini,
-  // and never changes what's cached/displayed as the "original" line.
-  const GTX_SLANG_NORMALIZE = [
+  // appear with no surrounding context. Gemini already handles this
+  // correctly (context + instructions), so this normalization ONLY applies
+  // to text sent to GTX/MyMemory, never to Gemini, and never changes what's
+  // cached/displayed as the "original" line.
+  const SLANG_NORMALIZE = [
     [/\bhoes\b/gi, 'women'],
     [/\bhoe\b/gi, 'woman'],
     [/\bho\b/gi, 'woman'],
     [/\bthots?\b/gi, 'women']
   ];
-  function normalizeForGTX(text) {
+  function normalizeForDumbEngines(text) {
     let t = text;
-    GTX_SLANG_NORMALIZE.forEach(([re, repl]) => { t = t.replace(re, repl); });
+    SLANG_NORMALIZE.forEach(([re, repl]) => { t = t.replace(re, repl); });
     return t;
   }
 
-  // Global concurrency gate for GTX, shared across EVERY call site in the
-  // whole extension. This is what actually stops bursts from stacking when
-  // several scan triggers overlap (songchange + scroll + mutation, for
-  // example).
-  const GTX_CONCURRENCY = 2;
-  const GTX_SPACING_MS = 220;
-  let gtxActive = 0;
-  const gtxWaiters = [];
-  function gtxAcquire() {
-    return new Promise(resolve => {
-      const tryAcquire = () => {
-        if (gtxActive < GTX_CONCURRENCY) {
-          gtxActive++;
-          resolve();
-        } else {
-          gtxWaiters.push(tryAcquire);
-        }
-      };
-      tryAcquire();
-    });
+  // Generic concurrency gate factory - used separately for GTX and MyMemory
+  // so a burst on one engine can never starve the other's slots.
+  function makeConcurrencyGate(limit, spacingMs) {
+    let active = 0;
+    const waiters = [];
+    return {
+      acquire() {
+        return new Promise(resolve => {
+          const tryAcquire = () => {
+            if (active < limit) { active++; resolve(); }
+            else { waiters.push(tryAcquire); }
+          };
+          tryAcquire();
+        });
+      },
+      release() {
+        active--;
+        const next = waiters.shift();
+        if (next) setTimeout(next, spacingMs);
+      }
+    };
   }
-  function gtxRelease() {
-    gtxActive--;
-    const next = gtxWaiters.shift();
-    if (next) setTimeout(next, GTX_SPACING_MS);
-  }
+  const gtxGate = makeConcurrencyGate(2, 220);
+  const mmGate = makeConcurrencyGate(2, 250);
 
   // One request per line, translation + romanization TOGETHER (dt=t&dt=rm)
-  // instead of two separate calls - halves GTX traffic compared to a
-  // two-call-per-line approach and makes romanization presence/absence
-  // depend on exactly one network call instead of two.
+  // instead of two separate calls.
   async function translateWithGTXPerLine(linesToTranslate) {
     if (Date.now() < gtxGloballyDownUntil) {
-      // Don't use the normal short 12s cooldown here - that made it look
-      // like translation was "about to retry any second" when it was
-      // actually stuck behind a multi-minute global backoff, burning scan
-      // cycles for nothing the whole time. Align the local cooldown to the
-      // real remaining wait (capped at 60s so we still periodically recheck
-      // rather than sleeping through the full 8-minute worst case).
       const remaining = Math.min(gtxGloballyDownUntil - Date.now(), 60000);
       linesToTranslate.forEach(t => markFailed(t, remaining));
       return;
     }
 
     await Promise.all(linesToTranslate.map(async (rawText) => {
-      await gtxAcquire();
+      await gtxGate.acquire();
       try {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(normalizeForGTX(rawText))}`;
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(normalizeForDumbEngines(rawText))}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
@@ -636,13 +611,72 @@ CRITICAL RULES:
         gtxConsecutiveFailures++;
         if (gtxConsecutiveFailures >= 3 && gtxGloballyDownUntil <= Date.now()) {
           const waitMs = GTX_BACKOFF_STEPS_MS[Math.min(gtxBackoffStage, GTX_BACKOFF_STEPS_MS.length - 1)];
-          warn(`GTX tekrar tekrar başarısız oluyor (muhtemelen rate-limit) - ${Math.round(waitMs / 1000)}sn bekleniyor, sonra otomatik tekrar denenecek`);
+          warn(`GTX tekrar tekrar başarısız oluyor (muhtemelen rate-limit) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
           gtxGloballyDownUntil = Date.now() + waitMs;
           gtxBackoffStage++;
         }
         markFailed(rawText);
       } finally {
-        gtxRelease();
+        gtxGate.release();
+      }
+    }));
+
+    saveCache();
+    updateDOMWithCache();
+  }
+
+  // Third, independent engine - no API key, own rate-limit pool, used only
+  // for whatever Gemini AND GTX both failed to produce. MyMemory doesn't
+  // return romanization, so this only ever fills "tr", never "romaja" -
+  // better to show the Turkish line with no pronunciation hint than to
+  // show nothing at all. Its free tier signals "out of quota" as an HTTP
+  // 200 with responseStatus !== 200 inside the JSON body, not as an HTTP
+  // error - so that field is what's actually checked, not the HTTP status.
+  async function translateWithMyMemoryPerLine(linesToTranslate) {
+    if (Date.now() < mmGloballyDownUntil) {
+      const remaining = Math.min(mmGloballyDownUntil - Date.now(), 60000);
+      linesToTranslate.forEach(t => markFailed(t, remaining));
+      return;
+    }
+
+    await Promise.all(linesToTranslate.map(async (rawText) => {
+      await mmGate.acquire();
+      try {
+        const q = normalizeForDumbEngines(rawText).slice(0, 480); // API caps q at 500 bytes
+        const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=auto|tr`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+
+        if (Number(json?.responseStatus) !== 200) {
+          throw new Error(json?.responseDetails || 'MyMemory kota/limit');
+        }
+
+        const trLine = (json?.responseData?.translatedText || '').trim();
+
+        if (trLine && normalize(trLine) !== normalize(rawText)) {
+          mmConsecutiveFailures = 0;
+          mmGloballyDownUntil = 0;
+          mmBackoffStage = 0;
+          const existing = cache.get(rawText) || {};
+          cache.set(rawText, {
+            tr: fixGluedWords(forcePerfectTurkish(trLine)),
+            romaja: existing.romaja || ''
+          });
+        } else {
+          markFailed(rawText);
+        }
+      } catch (e) {
+        mmConsecutiveFailures++;
+        if (mmConsecutiveFailures >= 3 && mmGloballyDownUntil <= Date.now()) {
+          const waitMs = MM_BACKOFF_STEPS_MS[Math.min(mmBackoffStage, MM_BACKOFF_STEPS_MS.length - 1)];
+          warn(`MyMemory tekrar tekrar başarısız oluyor (muhtemelen rate-limit) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
+          mmGloballyDownUntil = Date.now() + waitMs;
+          mmBackoffStage++;
+        }
+        markFailed(rawText);
+      } finally {
+        mmGate.release();
       }
     }));
 
@@ -651,9 +685,9 @@ CRITICAL RULES:
   }
 
   // Groups are processed SEQUENTIALLY (not in parallel) so a song never
-  // fires more than one Gemini call at a time - this is what makes the
-  // free-tier quota last roughly 4x longer than a per-chunk approach. In
-  // the overwhelming majority of songs there is exactly one group.
+  // fires more than one Gemini call at a time. In the overwhelming majority
+  // of songs there is exactly one group. Each group cascades through all
+  // three engines before a line is left to wait for the next scan cycle.
   async function processQueue(allVisibleLines) {
     const now = Date.now();
     const missing = allVisibleLines.filter(t =>
@@ -671,19 +705,27 @@ CRITICAL RULES:
 
       for (const group of groups) {
         let leftover = group;
-        const geminiReady = geminiApiKey && geminiApiKey.trim().length > 10 && Date.now() >= geminiGloballyDownUntil;
+        const geminiReady = geminiApiKeys.length > 0 && Date.now() >= geminiGloballyDownUntil;
 
         if (geminiReady) {
           try {
             leftover = await translateChunkWithGemini(group, allVisibleLines);
           } catch (e) {
-            warn('Gemini bu grup için tamamen başarısız oldu, GTX\'e düşülüyor:', (e && e.message) || e || 'bilinmeyen hata');
+            warn('Gemini bu grup için tamamen başarısız oldu, yedek motorlara düşülüyor:', (e && e.message) || e || 'bilinmeyen hata');
             leftover = group;
           }
         }
 
-        if (leftover && leftover.length > 0) {
+        if (leftover && leftover.length > 0 && Date.now() >= gtxGloballyDownUntil) {
           await translateWithGTXPerLine(leftover);
+        }
+
+        const stillMissing = group.filter(l => {
+          const c = cache.get(l);
+          return !c || !c.tr;
+        });
+        if (stillMissing.length > 0 && Date.now() >= mmGloballyDownUntil) {
+          await translateWithMyMemoryPerLine(stillMissing);
         }
       }
     } finally {
@@ -693,26 +735,29 @@ CRITICAL RULES:
 
   function refreshToggleButtonVisual(btn) {
     const now = Date.now();
-    const geminiDown = !!geminiApiKey && now < geminiGloballyDownUntil;
+    const hasKeys = geminiApiKeys.length > 0;
+    const geminiDown = hasKeys && now < geminiGloballyDownUntil;
     const gtxDown = now < gtxGloballyDownUntil;
-    const bothDown = geminiDown && gtxDown;
-    const anyWarn = geminiDown || gtxDown;
+    const mmDown = now < mmGloballyDownUntil;
+    const allDown = (!hasKeys || geminiDown) && gtxDown && mmDown;
+    const anyWarn = geminiDown || gtxDown || mmDown;
 
-    btn.className = `${isEnabled ? 'active' : ''} ${geminiApiKey ? 'ai-mode' : ''} ${anyWarn ? 'quota-warn' : ''}`.trim();
-    btn.textContent = bothDown ? '!!' : (geminiApiKey ? (anyWarn ? 'AI!' : 'AI') : (gtxDown ? 'TR!' : 'TR'));
+    btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${anyWarn ? 'quota-warn' : ''}`.trim();
+    btn.textContent = allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
 
-    if (bothDown) {
-      const waitSec = Math.max(0, Math.round((Math.max(geminiGloballyDownUntil, gtxGloballyDownUntil) - now) / 1000));
-      btn.title = `Hem Gemini hem Google Translate şu anda geçici olarak kullanılamıyor (muhtemelen rate-limit) - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
-    } else if (gtxDown) {
-      const waitSec = Math.max(0, Math.round((gtxGloballyDownUntil - now) / 1000));
-      btn.title = `Ücretsiz Google Translate motoru şu anda geçici olarak kullanılamıyor (rate-limit) - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
+    if (allDown) {
+      const waitSec = Math.max(0, Math.round((Math.max(geminiGloballyDownUntil, gtxGloballyDownUntil, mmGloballyDownUntil) - now) / 1000));
+      btn.title = `Tüm çeviri motorları (Gemini + Google Translate + MyMemory) şu anda geçici olarak kullanılamıyor (muhtemelen rate-limit) - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
+    } else if (geminiDown && (gtxDown || mmDown)) {
+      btn.title = 'Gemini anahtarlarının tamamı şu anda kota/limit sınırında, kalan yedek motorla devam ediliyor';
     } else if (geminiDown) {
-      btn.title = 'Gemini kotası şu anda dolu - geçici olarak sadece ücretsiz Google Translate kullanılıyor';
+      btn.title = 'Gemini anahtarlarının tamamı şu anda kota/limit sınırında - geçici olarak sadece yedek (ücretsiz) motorlar kullanılıyor';
+    } else if (gtxDown || mmDown) {
+      btn.title = `${gtxDown ? 'Google Translate' : 'MyMemory'} şu anda geçici olarak kullanılamıyor (rate-limit) - diğer motorlar devrede`;
     } else {
-      btn.title = geminiApiKey
-        ? 'God Mode V35 (sağ tık: API anahtarını değiştir)'
-        : 'Sağ tık: Gemini API anahtarı gir (isteğe bağlı, daha iyi çeviri için)';
+      btn.title = hasKeys
+        ? `God Mode V36 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: düzenle, Shift+sağ tık: cache'i de sıfırla)`
+        : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
 
@@ -742,31 +787,37 @@ CRITICAL RULES:
 
     btn.oncontextmenu = (e) => {
       e.preventDefault();
-      const input = prompt('🌟 Spicy Lyrics V35 🌟\nGemini API Anahtarınızı girin:', geminiApiKey);
-      if (input !== null) {
-        geminiApiKey = input.trim();
-        localStorage.setItem('spicy_tr_gemini_key', geminiApiKey);
-        // Full reset, not just the API key: clears BOTH engines' backoff
-        // state, every dead-model cooldown, the whole cache, and every
-        // pending failure cooldown, then rescans repeatedly over the next
-        // ~1.2s instead of once - this is the manual "unstick everything
-        // right now" escape hatch, so it needs to keep trying in case Spicy
-        // Lyrics' own lyrics DOM hasn't finished loading/swapping to the
-        // current song at the exact instant you click OK.
-        geminiGloballyDownUntil = 0;
-        geminiBackoffStage = 0;
-        gtxGloballyDownUntil = 0;
-        gtxBackoffStage = 0;
-        gtxConsecutiveFailures = 0;
-        deadModels.clear();
+      const currentValue = geminiApiKeys.join(', ');
+      const input = prompt('🌟 Spicy Lyrics V36 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, 2-3 anahtar = 2-3x kota):', currentValue);
+      if (input === null) return;
+
+      geminiApiKeys = Array.from(new Set(
+        input.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
+      ));
+      try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
+
+      // Reset backoff/cooldown state so the new/edited key(s) get tried
+      // right away - cheap to reset, no data loss. The translation CACHE
+      // is deliberately left untouched here: wiping it on every key edit
+      // was exactly what caused a mass-retranslation burst in V35.
+      geminiGloballyDownUntil = 0; geminiBackoffStage = 0;
+      gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0;
+      mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0;
+      deadModels.clear();
+      failedUntil.clear();
+
+      // Shift+right-click = also wipe the translation cache on purpose
+      // (full nuclear reset, for when something actually looks corrupted
+      // or stuck). A plain right-click never touches cached translations.
+      if (e.shiftKey) {
         cache.clear();
-        failedUntil.clear();
-        inFlight.clear();
         localStorage.removeItem(STORAGE_CACHE_KEY);
         document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(b => b.remove());
-        refreshToggleButtonVisual(btn);
-        triggerMultiStageScan();
+        log("Shift+sağ tık: cache de tamamen temizlendi");
       }
+
+      refreshToggleButtonVisual(btn);
+      triggerMultiStageScan();
     };
     controls.appendChild(btn);
   }
@@ -804,8 +855,8 @@ CRITICAL RULES:
 
   // Lightweight debounce specifically for scan triggers that fire on their
   // own schedule and can arrive in bursts (DOM mutations anywhere on the
-  // page, scroll events) - collapses a burst into a single scanLines()
-  // call instead of one per event. triggerMultiStageScan() below calls
+  // page, scroll events) - collapses a burst into a single scanLines() call
+  // instead of one per event. triggerMultiStageScan() below calls
   // scanLines() directly and is NOT routed through this, since its timing
   // after a song change/seek is already deliberately staggered.
   let scanScheduled = false;
