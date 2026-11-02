@@ -6,7 +6,6 @@
     "description": "Simultaneous Romanization (Romaja) and Context-Aware / Gemini AI Turkish Translations right below Spicy Lyrics lines, just like YouTube Music Better Lyrics! Right-click the button to add your Gemini key(s) and fully reset the translation cache.",
     "preview": "preview.png",
     "main": "spicy-tr.js",
-    "icon": "icon.png",
     "authors": [
       {
         "name": "korelili",
