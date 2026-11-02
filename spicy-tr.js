@@ -1,17 +1,27 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 44.0.0 (Built on top of V43 — fixes the two real bugs behind
-//           "nothing resets when I enter my API keys / stuck garbage
-//           translations": (1) the translation cache was never cleared
-//           by the right-click+OK flow, so already-cached broken lines
-//           from GTX/MyMemory stayed on screen forever even after valid
-//           Gemini keys were added; (2) repairCache() referenced an
-//           undefined variable (`reformalized` instead of
-//           `reformalFixed`), which silently threw and skipped
-//           saveCache() on the exact runs where only "siz->sen" cleanup
-//           happened, so those repairs never persisted to disk.)
+// VERSION: 45.0.0 (Built on top of V44 — fixes the actual reason
+//           right-click+OK appeared to do NOTHING at all, on every
+//           version up to and including V44: window.prompt() and
+//           window.confirm() do not produce any visible dialog inside
+//           Spotify's CEF runtime. The code was calling them correctly,
+//           but there was never anything on screen to type a key into
+//           or click OK on - so entering keys silently never happened.
+//           Replaced with a real on-screen panel built on Spicetify's
+//           own supported Spicetify.PopupModal API.)
 //
-// V44 - WHAT CHANGED AND WHY:
+// V45 - WHAT CHANGED AND WHY:
+//
+// RIGHT-CLICK NOW OPENS A REAL VISIBLE PANEL: right-clicking the button
+// now calls Spicetify.PopupModal.display() with a text box for your
+// Gemini key(s), a warning about the cache wipe, and Cancel/Save
+// buttons - this is Spicetify's own supported way to show UI, and it
+// actually renders inside Spotify, unlike prompt()/confirm(). Saving
+// still does everything V44's fix did (see below): applies the new
+// keys, clears all cooldown/backoff state, and fully wipes the
+// translation cache so every visible line gets a genuine retranslation.
+//
+// V44 - WHAT CHANGED AND WHY (still included in this version):
 //
 // 1) RIGHT-CLICK+OK IS NOW A REAL FULL RESET: previously it only reset
 //    the Gemini/GTX/MyMemory cooldown timers and dead-model list. It
@@ -62,11 +72,11 @@
 // nobody's cache gets silently wiped just by installing this update;
 // it's only cleared when you explicitly use the reset button).
 
-(function spicyTurkishProV44() {
+(function spicyTurkishProV45() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V44]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V44]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V44]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V45]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V45]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V45]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function fetchWithTimeout(url, options, timeoutMs) {
@@ -1098,7 +1108,7 @@ CRITICAL RULES:
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V44 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle VE TÜM ÇEVİRİLERİ SIFIRLA)`
+        ? `God Mode V45 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle VE TÜM ÇEVİRİLERİ SIFIRLA)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -1129,51 +1139,138 @@ CRITICAL RULES:
       }
     };
 
-    // (V44) This is now a REAL full reset. Earlier versions only reset the
-    // Gemini/GTX/MyMemory cooldown timers here, never the translation
-    // cache itself - so a line that was already cached (even with broken
-    // GTX output) stayed exactly as-is forever, even after valid Gemini
-    // keys were added. Now: saving keys here clears the entire cache (in
-    // memory and in localStorage) so every visible line gets a genuine
-    // re-translation with whatever keys are currently set. A confirm()
-    // guards it since it means real API calls for every cached song.
+    // (V45) CRITICAL FIX: window.prompt()/confirm() DO NOT WORK inside
+    // Spotify's CEF (Chromium Embedded Framework) runtime - calling them
+    // does not show any dialog at all, they just silently do nothing /
+    // return immediately. This is why right-click+OK looked like it did
+    // literally nothing: the prompt() call for entering keys never
+    // produced a visible box to type into in the first place, on ANY
+    // version of this script, including V44 and everything before it.
+    // Fixed by building a real on-screen panel with Spicetify.PopupModal
+    // (Spicetify's own supported modal API) instead of prompt()/confirm().
+    function applyNewKeysAndFullReset(rawInput) {
+      geminiApiKeys = Array.from(new Set(
+        rawInput.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
+      ));
+      try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
+
+      geminiGloballyDownUntil = 0; geminiBackoffStage = 0; geminiLastError = '';
+      gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0; gtxLastError = '';
+      mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0; mmLastError = '';
+      deadModels.clear();
+      failedUntil.clear();
+      inFlight.clear();
+      needsRomajaRefetch.clear();
+      saveBackoffState();
+
+      // THE ACTUAL CACHE FIX (from V44): wipe the translation cache so
+      // nothing stale survives the reset.
+      cache.clear();
+      try { localStorage.removeItem(STORAGE_CACHE_KEY); } catch (e4) {}
+      saveCache();
+
+      document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(el => el.remove());
+      refreshToggleButtonVisual(btn);
+      triggerMultiStageScan();
+      try { Spicetify.showNotification?.('Anahtarlar kaydedildi, önbellek temizlendi - yeniden çevriliyor...'); } catch (e5) {}
+    }
+
+    function openKeySettingsModal() {
+      if (!Spicetify?.PopupModal?.display) {
+        // Extremely old/unsupported Spicetify build without PopupModal -
+        // last-resort fallback (may not show anything, but at least we tried).
+        try {
+          const fallbackInput = prompt('Gemini API anahtarlarınızı girin (virgülle ayırın):', geminiApiKeys.join(', '));
+          if (fallbackInput !== null) applyNewKeysAndFullReset(fallbackInput);
+        } catch (eFallback) {
+          err('PopupModal yok ve prompt() de çalışmadı, anahtar girişi yapılamıyor:', eFallback);
+        }
+        return;
+      }
+
+      const wrap = document.createElement('div');
+      wrap.style.display = 'flex';
+      wrap.style.flexDirection = 'column';
+      wrap.style.gap = '12px';
+      wrap.style.minWidth = '360px';
+
+      const label = document.createElement('div');
+      label.textContent = 'Gemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):';
+      label.style.fontSize = '13px';
+      label.style.lineHeight = '1.4';
+      wrap.appendChild(label);
+
+      const textarea = document.createElement('textarea');
+      textarea.value = geminiApiKeys.join(', ');
+      textarea.placeholder = 'AIzaSy... , AIzaSy... , ...';
+      textarea.style.width = '100%';
+      textarea.style.minHeight = '70px';
+      textarea.style.boxSizing = 'border-box';
+      textarea.style.background = 'rgba(255,255,255,0.08)';
+      textarea.style.color = '#fff';
+      textarea.style.border = '1px solid rgba(255,255,255,0.25)';
+      textarea.style.borderRadius = '4px';
+      textarea.style.padding = '8px';
+      textarea.style.fontFamily = 'monospace';
+      textarea.style.fontSize = '12px';
+      wrap.appendChild(textarea);
+
+      const warnText = document.createElement('div');
+      warnText.style.fontSize = '12px';
+      warnText.style.opacity = '0.75';
+      warnText.textContent = cache.size > 0
+        ? `Kaydet'e bastığınızda önbellekteki ${cache.size} satırlık çeviri TAMAMEN SİLİNİR ve görünen şarkılar yeniden çevrilir (gerçek API/istek kullanımı demektir).`
+        : `Önbellek şu an boş - kaydettiğinizde yeni anahtarlarla direkt çeviriye başlanacak.`;
+      wrap.appendChild(warnText);
+
+      const btnRow = document.createElement('div');
+      btnRow.style.display = 'flex';
+      btnRow.style.gap = '8px';
+      btnRow.style.justifyContent = 'flex-end';
+      btnRow.style.marginTop = '4px';
+
+      const mkBtn = (text, primary) => {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.style.padding = '8px 16px';
+        b.style.borderRadius = '500px';
+        b.style.border = 'none';
+        b.style.cursor = 'pointer';
+        b.style.fontWeight = '700';
+        b.style.fontSize = '13px';
+        b.style.background = primary ? '#1db954' : 'rgba(255,255,255,0.1)';
+        b.style.color = primary ? '#000' : '#fff';
+        return b;
+      };
+
+      const cancelBtn = mkBtn('İptal', false);
+      cancelBtn.onclick = () => Spicetify.PopupModal.hide();
+
+      const saveBtn = mkBtn('Kaydet ve Sıfırla', true);
+      saveBtn.onclick = () => {
+        try {
+          applyNewKeysAndFullReset(textarea.value);
+        } catch (eSave) {
+          err('Anahtar kaydetme/sıfırlama hata verdi:', eSave);
+        } finally {
+          Spicetify.PopupModal.hide();
+        }
+      };
+
+      btnRow.appendChild(cancelBtn);
+      btnRow.appendChild(saveBtn);
+      wrap.appendChild(btnRow);
+
+      Spicetify.PopupModal.display({
+        title: 'Spicy Lyrics - Gemini API Anahtarları',
+        content: wrap
+      });
+    }
+
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       try {
-        const currentValue = geminiApiKeys.join(', ');
-        const input = prompt('🌟 Spicy Lyrics V44 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):\n\nOK\'e bastığınızda TÜM ÇEVİRİ ÖNBELLEĞİ SİLİNİR ve açık olan şarkılar yeniden çevrilir.', currentValue);
-        if (input === null) return;
-
-        const cacheSize = cache.size;
-        if (cacheSize > 0) {
-          const confirmed = confirm(`Bu işlem önbellekteki ${cacheSize} satırlık çeviriyi tamamen silecek ve görünen şarkıları yeniden çevirecek (gerçek API/istek kullanımı anlamına gelir). Devam edilsin mi?`);
-          if (!confirmed) return;
-        }
-
-        geminiApiKeys = Array.from(new Set(
-          input.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
-        ));
-        try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
-
-        geminiGloballyDownUntil = 0; geminiBackoffStage = 0; geminiLastError = '';
-        gtxGloballyDownUntil = 0; gtxBackoffStage = 0; gtxConsecutiveFailures = 0; gtxLastError = '';
-        mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0; mmLastError = '';
-        deadModels.clear();
-        failedUntil.clear();
-        inFlight.clear();
-        needsRomajaRefetch.clear();
-        saveBackoffState();
-
-        // (V44) THE ACTUAL FIX: wipe the translation cache so nothing
-        // stale survives the reset.
-        cache.clear();
-        try { localStorage.removeItem(STORAGE_CACHE_KEY); } catch (e4) {}
-        saveCache();
-
-        document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(el => el.remove());
-
-        refreshToggleButtonVisual(btn);
-        triggerMultiStageScan();
+        openKeySettingsModal();
       } catch (err2) {
         err('Sağ tık menüsü hata verdi:', err2);
       }
