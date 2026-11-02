@@ -402,8 +402,13 @@
     resizeTimer = setTimeout(() => { window.dispatchEvent(new Event('resize')); }, 100);
   }
 
-  function isNonLatin(text) {
-    return /[^\x00-\x7F -ɏḀ-ỿ -⁯⸀-⹿\s]/u.test(text);
+function isNonLatin(text) {
+    // (V46) Artık "hangi scriptler non-Latin sayılır" listesi açıkça
+    // yazılıyor (Hangul, Hiragana/Katakana, CJK Han, Thai, Cyrillic,
+    // Arabic, Devanagari...) - eski ters-mantık regex yanlışlıkla Tay
+    // alfabesinin tamamını "zaten Latin" sanıyordu, bu yüzden Tayca
+    // satırlarda romaja kutusu hiç çizilmiyordu.
+    return /[\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7A3\uF900-\uFAFF\uFF66-\uFF9F]/u.test(text);
   }
 
   function normalize(s) {
