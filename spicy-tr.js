@@ -435,11 +435,18 @@ function isNonLatin(text) {
     return null;
   }
 
+ function countNonLatinWords(line) {
+    return line.trim().split(/\s+/).filter(Boolean).filter(w => isNonLatin(w)).length;
+  }
+
   function looksGluedRomaja(originalLine, rom) {
     if (!rom || /\s/.test(rom)) return false;
     if (rom.length < 8) return false;
-    const tokens = originalLine.trim().split(/\s+/).filter(Boolean);
-    return tokens.length >= 2;
+    // (V46) Artık TÜM kelime sayısına değil, satırdaki non-Latin (örn.
+    // Korece) kelime sayısına bakıyor - "Korece kelime + İngilizce cümle"
+    // gibi karışık satırlarda tek Korece kelimenin tek parça (boşluksuz)
+    // romanizasyonu artık yanlışlıkla "bitişik/bozuk" sayılıp silinmiyor.
+    return countNonLatinWords(originalLine) >= 2;
   }
 
   function isAdlibPattern(line) {
