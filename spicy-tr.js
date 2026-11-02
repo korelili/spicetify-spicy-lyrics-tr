@@ -1,80 +1,72 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 43.0.0 (Built on top of V41, not V42 - V42 had the right ideas
-//           but a load-order bug that crashed the entire script. This
-//           redoes those same two ideas correctly, and makes the loading
-//           defensive so a bug like that one can't take the whole script
-//           down again.)
+// VERSION: 44.0.0 (Built on top of V43 — fixes the two real bugs behind
+//           "nothing resets when I enter my API keys / stuck garbage
+//           translations": (1) the translation cache was never cleared
+//           by the right-click+OK flow, so already-cached broken lines
+//           from GTX/MyMemory stayed on screen forever even after valid
+//           Gemini keys were added; (2) repairCache() referenced an
+//           undefined variable (`reformalized` instead of
+//           `reformalFixed`), which silently threw and skipped
+//           saveCache() on the exact runs where only "siz->sen" cleanup
+//           happened, so those repairs never persisted to disk.)
 //
-// V43 - WHAT CHANGED AND WHY:
+// V44 - WHAT CHANGED AND WHY:
 //
-// BACKGROUND: V42 tried to add two things on top of V41 - (1) skip
-// translating lines that are already Turkish, so a Turkish song doesn't
-// get a pointless paraphrase of itself rendered underneath its own
-// lyrics, and (2) a stronger localization prompt (real idioms, matching
-// explicitness/register, not literally unpacking nonsense hook phrases).
-// Both ideas were right, but V42's implementation of (1) put
-// `const TURKISH_COMMON_WORDS = ...` down near the style block, AFTER
-// repairCache() already needed it at load time. A `const` lives in the
-// temporal dead zone until its own declaration line actually executes -
-// so the very first thing V42 did on load was throw "Cannot access
-// 'TURKISH_COMMON_WORDS' before initialization", and because nothing
-// was wrapped around that call, the entire script died right there: no
-// button, no translations, nothing.
+// 1) RIGHT-CLICK+OK IS NOW A REAL FULL RESET: previously it only reset
+//    the Gemini/GTX/MyMemory cooldown timers and dead-model list. It
+//    never touched `cache` itself, so a line that had already been
+//    cached (even as broken GTX output like "Wayuphighlikemybilincim")
+//    was considered "done" forever — scanLines() skips any line already
+//    in cache, so adding API keys afterwards changed nothing for lines
+//    that already had a (bad) cached entry. Now, submitting the dialog
+//    clears the in-memory cache, wipes the cache entry in localStorage,
+//    clears failedUntil/inFlight/needsRomajaRefetch, and re-scans — so
+//    every visible line gets re-translated from scratch, this time with
+//    your Gemini keys actually in play. A confirm() guards this since it
+//    means every cached song gets re-translated (real API usage), so you
+//    don't nuke a large cache by accident.
 //
-// FIX IN V43: this version is built from V41 (the known-good baseline),
-// not from V42's code. It re-adds the same two ideas, done right:
+// 2) FIXED repairCache() CRASH: `reformalized` -> `reformalFixed` typo
+//    fixed. This was throwing a ReferenceError and skipping saveCache()
+//    on exactly the runs where only rule-3 (siz/size->sen/sana cleanup)
+//    fixes were made, silently discarding those repairs every time.
 //
-// 1) SKIP ALREADY-TURKISH LINES: a new looksTurkish() check - Turkish-
-//    specific letters (ç ğ ı ö ş ü), or a small set of common Turkish
-//    function words for short accent-free lines - now lives right above
-//    repairCache(), so TURKISH_COMMON_WORDS is guaranteed to already be
-//    initialized before anything can call looksTurkish(). It's used in
-//    two places: scanLines() skips an already-Turkish line entirely
-//    (never queued, never sent to any engine, never given a translation
-//    box), and repairCache() purges any already-cached "translation"
-//    whose source line is itself Turkish (cleaning up what earlier
-//    versions already wasted real API calls on). This is the fix for a
-//    Turkish song (e.g. "Beynimi Siktin") getting a second, redundant,
-//    reworded line rendered under its own already-Turkish lyrics.
+// 3) GLUED-OUTPUT GUARD, BOTH DIRECTIONS: GTX/MyMemory output is now
+//    rejected (not just "repaired") when it is obviously glued: if the
+//    source line has 2+ words but the returned Turkish translation has
+//    NO spaces at all and is long, or contains any single space-split
+//    token over 22 characters, it's treated as a failed translation
+//    instead of being cached and shown. This is what produced lines
+//    like "Wayuphighlikemybilincim" and "Çünkühiçbirisenisikiyor" on
+//    screen — GTX's own response had no word boundaries in it, and the
+//    old fixGluedWords() only catches lowercase->uppercase transitions,
+//    which a run of all-lowercase glued words never has. Gemini doesn't
+//    have this failure mode (it's instructed explicitly on spacing), so
+//    once Gemini keys are actually working again (fix #1), this path is
+//    rarely hit going forward — this guard just stops already-bad GTX/
+//    MyMemory output from being cached and shown while a line is still
+//    on the Gemini->GTX->MyMemory fallback chain. repairCache() now also
+//    purges any previously-cached entry that matches this same pattern,
+//    so old glued lines get cleaned up on next load even without using
+//    the reset button.
 //
-// 2) STRONGER LOCALIZATION PROMPT: rule 3b is rewritten with concrete
-//    WRONG/RIGHT examples instead of just general guidance, covering
-//    three specific failure modes flagged from real usage:
-//      - Idioms translated word-for-word instead of by function
-//        ("hold your horses" -> "acele etme", not a literal horse).
-//      - Vulgar/explicit lines getting watered down into a dated,
-//        euphemistic word instead of the actual contemporary equivalent
-//        (e.g. "beceremez" is a soft, old-fashioned dodge for an explicit
-//        line like "no one fucks you like I do" - it should land as
-//        direct and current as the source, e.g. "sikemez").
-//      - Nonsense/invented hook phrases translated literally into
-//        gibberish ("Bubble pop electric" -> "Elektrikli baloncuk
-//        patlaması" reads like a mistranslation, not a hook) instead of
-//        carrying the energy/vibe of the phrase.
-//
-// 3) DEFENSIVE LOADING: the repairCache() call at startup is now wrapped
-//    in its own try/catch. This is the actual root-cause fix for "one bug
-//    took down the whole script" as a category, not just for this one
-//    bug - if anything inside repairCache() throws in the future, for any
-//    reason, the rest of the script (styling, the toggle button,
-//    scanning, translation) still loads and runs normally instead of the
-//    whole extension silently disappearing.
-//
-// UNCHANGED FROM V41 (none of this was touched): the 45s short cooldown
-// for all transient Gemini errors (the old 3-hour "daily quota" exile is
-// still gone), the Gemini model list, the MyMemory language-detect fix,
-// romaja glomming repair, ad-lib fallback protection, persistent backoff
-// state across reloads, right-click+OK full reset+repair, single-source-
+// UNCHANGED FROM V43: looksTurkish() skip, the stronger localization
+// prompt (idioms/explicitness/nonsense-hook rules), defensive
+// try/catch around the startup repairCache() call, the 45s short
+// cooldown for transient Gemini errors, the Gemini model list, the
+// MyMemory language-detect fix, romaja glomming repair, ad-lib fallback
+// protection, persistent backoff state across reloads, single-source-
 // of-truth styling, watchdog, singleton guard, idempotent rendering,
-// persistent translation cache key (still spicy_tr_godmode_v35 - nobody's
-// cache gets wiped by this update).
+// persistent translation cache key (still spicy_tr_godmode_v35 —
+// nobody's cache gets silently wiped just by installing this update;
+// it's only cleared when you explicitly use the reset button).
 
-(function spicyTurkishProV43() {
+(function spicyTurkishProV44() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V43]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V43]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V43]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V44]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V44]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V44]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function fetchWithTimeout(url, options, timeoutMs) {
@@ -125,16 +117,10 @@
   const failedUntil = new Map();
   const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
-  // V41: a single short cooldown now covers EVERY transient Gemini failure -
-  // 429 (per-minute rate limit OR daily quota, Google's error text can't
-  // reliably tell them apart), 5xx, and timeouts. 45s is enough that with
-  // 4 keys x 4 models the pool recovers almost immediately on its own,
-  // instead of a combo sitting sidelined for hours over what is usually
-  // just a 60-second window.
   const MODEL_DEAD_SHORT_MS = 45000;
   const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;  // 404 = wrong/retired model id, genuinely permanent until the model list is updated
 
-  const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // 30s,1m,2m,3m - only hit when ALL 16 combos are down AT ONCE, which should now be rare
+  const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // 30s,1m,2m,3m
   let geminiGloballyDownUntil = 0;
   let geminiBackoffStage = 0;
 
@@ -150,11 +136,6 @@
   let mmBackoffStage = 0;
   let mmConsecutiveFailures = 0;
 
-  // --- Persist cooldown/backoff state across script reloads. Without
-  // this, re-installing/testing a new version (or Spotify restarting)
-  // forgets a real, still-active rate limit and immediately re-triggers
-  // it. Refreshed periodically by the watchdog; restored here on load,
-  // but only if it hasn't actually expired yet. ---
   const BACKOFF_STATE_KEY = 'spicy_tr_backoff_state_v1';
   function saveBackoffState() {
     try {
@@ -191,7 +172,7 @@
         });
       }
       if (geminiGloballyDownUntil > now || gtxGloballyDownUntil > now || mmGloballyDownUntil > now || deadModels.size > 0) {
-        log('Önceki oturumdan hâlâ geçerli olan bekleme süreleri geri yüklendi (gerçek limitler tekrar tetiklenmesin diye).[cite: 17]');
+        log('Önceki oturumdan hâlâ geçerli olan bekleme süreleri geri yüklendi (gerçek limitler tekrar tetiklenmesin diye).');
       }
     } catch (e) {}
   }
@@ -241,25 +222,6 @@
     } catch (e) {}
   }
 
-  // (V43) A line that's already Turkish never needs translating - sending
-  // it to a translation engine just gets back a reworded paraphrase of
-  // itself, which used to render as a pointless "translation" under
-  // already-Turkish lyrics (and burned a real API call doing it). Turkish-
-  // specific letters are a near-unambiguous signal; for short lines with
-  // none of those, fall back to a small set of very common Turkish
-  // function words matched as whole words.
-  // NOTE: this MUST be defined (and TURKISH_COMMON_WORDS initialized) at
-  // or before this point in the file - i.e. before repairCache() is ever
-  // CALLED below. repairCache() calls looksTurkish() during initial load,
-  // and a `const` sits in the temporal dead zone until its own
-  // declaration line actually runs. (This is exactly what crashed the
-  // whole script in an earlier attempt at this feature: the const lived
-  // far below, near the style block, and referencing it from
-  // repairCache() at load time threw "Cannot access
-  // 'TURKISH_COMMON_WORDS' before initialization" before a single line of
-  // the script - button, translations, everything - ever ran. Keeping the
-  // const right here, above its only two call sites (repairCache() and
-  // scanLines()), makes that class of bug impossible.)[cite: 17]
   const TURKISH_COMMON_WORDS = /\b(bir|bu|şu|ben|sen|biz|siz|değil|gibi|için|ama|çok|var|yok|ile|ne|nasıl|neden|her|daha|olan|oldu|olacak|sanki|kadar|benim|senin|onun|beni|seni|bana|sana|gel|gelse|değilsin|yine|hep|artık|belki|hiç)\b/i;
   function looksTurkish(text) {
     if (!text) return false;
@@ -270,26 +232,44 @@
     return matches >= 2 || (words.length <= 3 && matches >= 1);
   }
 
-  // Repairs data corrupted by bugs from earlier versions. All of these
-  // got cached permanently since nothing ever re-validated a cache hit.
-  // Runs once on load, and again any time you right-click the toggle + OK.[cite: 17]
+  // (V44) Detects translator output that is obviously glued together with
+  // no word boundaries - the failure mode behind lines like
+  // "Wayuphighlikemybilincim" or "Çünkühiçbirisenisikiyor". GTX/MyMemory
+  // occasionally return a sentence with missing spaces, and the existing
+  // fixGluedWords() can only repair a lowercase->uppercase transition, so
+  // an all-lowercase glued run sails straight through untouched.
+  function looksGluedTranslation(originalLine, translated) {
+    if (!translated) return false;
+    const srcTokens = (originalLine || '').trim().split(/\s+/).filter(Boolean);
+    if (srcTokens.length < 2) return false;
+    const trTokens = translated.trim().split(/\s+/).filter(Boolean);
+    if (trTokens.length === 0) return false;
+    if (trTokens.length === 1 && translated.length >= 10) return true;
+    if (trTokens.some(t => t.replace(/[^a-zçğıöşüA-ZÇĞİÖŞÜ]/g, '').length > 22)) return true;
+    return false;
+  }
+
   function repairCache() {
-    let fixed = 0, purged = 0, reformalFixed = 0, turkishPurged = 0;
+    let fixed = 0, purged = 0, reformalFixed = 0, turkishPurged = 0, gluedPurged = 0;
     for (const [rawLine, data] of Array.from(cache.entries())) {
       if (!data) continue;
 
-      // 0) (V43) A line that is itself already Turkish never needed a
-      // "translation" in the first place - whatever got cached for it is
-      // pure waste (and usually just a reworded paraphrase of itself).[cite: 17]
       if (looksTurkish(rawLine)) {
         cache.delete(rawLine);
         turkishPurged++;
         continue;
       }
 
+      // (V44) Obviously glued-together output from an earlier bad
+      // GTX/MyMemory response - purge so the line gets a real retry.
+      if (data.tr && looksGluedTranslation(rawLine, data.tr)) {
+        cache.delete(rawLine);
+        gluedPurged++;
+        continue;
+      }
+
       let changed = false;
 
-      // 1) Glued/unspaced romanization (V39 fix) - repair or discard.
       if (data.romaja && !/\s/.test(data.romaja) && data.romaja.length >= 8) {
         const repaired = splitRepeatingUnit(data.romaja);
         if (repaired) {
@@ -302,18 +282,12 @@
         if (changed) fixed++;
       }
 
-      // 2) Literal word-by-word ad-lib mistranslation (V39 fix) - purge.
       if (isAdlibPattern(rawLine) && data.tr && data.tr.includes('&') && normalize(data.tr) !== normalize(rawLine)) {
         cache.delete(rawLine);
         purged++;
         continue;
       }
 
-      // 3) Leftover formal "siz" forms or other patterns that today's
-      // forcePerfectTurkish would now catch but didn't exist (or wasn't
-      // applied) when this line was first cached. Guarded on both sides
-      // so this can never accidentally turn a suppressed/untranslated
-      // marker (tr === rawLine) into a bogus visible "translation".
       if (data.tr && normalize(data.tr) !== normalize(rawLine)) {
         const reformalized = forcePerfectTurkish(data.tr);
         if (reformalized && reformalized !== data.tr && normalize(reformalized) !== normalize(rawLine)) {
@@ -325,18 +299,16 @@
 
       if (changed) cache.set(rawLine, data);
     }
-    if (fixed || purged || reformalized || turkishPurged) {
+    // (V44) FIX: this used to reference an undefined `reformalized`
+    // variable instead of `reformalFixed`, which threw and skipped
+    // saveCache() below on any run where only rule-3 fixes happened.
+    if (fixed || purged || reformalFixed || turkishPurged || gluedPurged) {
       saveCache();
-      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi, ${reformalFixed} satırda resmi/"siz" kalıntısı temizlendi, ${turkishPurged} zaten-Türkçe satırın gereksiz çevirisi silindi.[cite: 17]`);
+      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi, ${reformalFixed} satırda resmi/"siz" kalıntısı temizlendi, ${turkishPurged} zaten-Türkçe satırın gereksiz çevirisi silindi, ${gluedPurged} bitişik/hatalı çeviri silindi.`);
     }
   }
-  // V43: wrapped, unlike earlier versions - if repairCache() throws for ANY
-  // reason (a future bug, a weird cache entry, whatever), the rest of the
-  // script (styling, the toggle button, scanning, translation) still
-  // loads and runs normally. A single broken helper can no longer take
-  // the whole extension down with it.[cite: 17]
   try {
-    repairCache(); // helper functions below are hoisted, safe to call here
+    repairCache();
   } catch (e) {
     err('Cache onarımı sırasında beklenmeyen hata (cache onarımı atlandı, eklentinin geri kalanı normal şekilde devam ediyor):', e);
   }
@@ -428,9 +400,6 @@
     return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   }
 
-  // Detects a string with NO whitespace that is a clean repetition of one
-  // short unit (e.g. "mamamamamama" -> "ma" x6) and reconstructs it with
-  // spaces between each repeat.
   function splitRepeatingUnit(s) {
     if (!s || /\s/.test(s)) return null;
     const n = s.length;
@@ -470,10 +439,6 @@
     return maxCount / tokens.length >= 0.6;
   }
 
-  // MyMemory's public API has no reliable auto-detect: "auto",
-  // "autodetect" and "AUTODETECT" all hard-fail with "IS AN INVALID
-  // SOURCE LANGUAGE". This script-side guess replaces it (same workaround
-  // other MyMemory client libraries use in the wild).[cite: 17]
   function detectSourceLangForMyMemory(text) {
     if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(text)) return 'ko';
     if (/[぀-ヿ]/.test(text)) return 'ja';
@@ -703,9 +668,6 @@ CRITICAL RULES:
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
               warn(`Model "${model}" bulunamadı (404, anahtar ...${keyFp(apiKey)}) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
             } else {
-              // V41: 429 (rate limit OR daily quota - can't reliably tell
-              // apart from the message text) and every other transient
-              // error all share the same short cooldown now.
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
               warn(`[${model} ...${keyFp(apiKey)}] geçici hata (HTTP ${res.status}) - ~${Math.round(MODEL_DEAD_SHORT_MS / 1000)}sn sonra bu kombinasyon tekrar denenecek${bodyMsg ? ': ' + bodyMsg : ''}`);
             }
@@ -726,6 +688,7 @@ CRITICAL RULES:
 
             const cleanTr = fixGluedWords(forcePerfectTurkish(trRaw));
             if (normalize(cleanTr) === normalize(rawLine)) return;
+            if (looksGluedTranslation(rawLine, cleanTr)) return; // (V44) reject obviously glued output instead of caching it
 
             let cleanRom = '';
             if (isNonLatin(rawLine)) {
@@ -872,7 +835,9 @@ CRITICAL RULES:
 
           const existing = cache.get(rawText) || {};
           const cleanRomaja = isNonLatin(rawText) ? fixGluedWords(romaja) : '';
-          const useTr = !adlib && trLine && normalize(trLine) !== normalize(rawText);
+          const fixedTr = fixGluedWords(forcePerfectTurkish(trLine));
+          // (V44) reject obviously glued GTX output instead of caching/showing it
+          const useTr = !adlib && trLine && normalize(trLine) !== normalize(rawText) && !looksGluedTranslation(rawText, fixedTr);
           const gotSomethingNew = useTr || (cleanRomaja && !existing.romaja);
 
           if (gotSomethingNew) {
@@ -880,7 +845,7 @@ CRITICAL RULES:
             gtxGloballyDownUntil = 0;
             gtxBackoffStage = 0;
             cache.set(rawText, {
-              tr: useTr ? fixGluedWords(forcePerfectTurkish(trLine)) : (existing.tr || rawText),
+              tr: useTr ? fixedTr : (existing.tr || rawText),
               romaja: cleanRomaja || existing.romaja || ''
             });
           } else {
@@ -992,14 +957,16 @@ CRITICAL RULES:
           }
 
           const trLine = (json?.responseData?.translatedText || '').trim();
+          const fixedTr = fixGluedWords(forcePerfectTurkish(trLine));
 
-          if (trLine && normalize(trLine) !== normalize(rawText)) {
+          // (V44) reject obviously glued MyMemory output instead of caching/showing it
+          if (trLine && normalize(trLine) !== normalize(rawText) && !looksGluedTranslation(rawText, fixedTr)) {
             mmConsecutiveFailures = 0;
             mmGloballyDownUntil = 0;
             mmBackoffStage = 0;
             const existing = cache.get(rawText) || {};
             cache.set(rawText, {
-              tr: fixGluedWords(forcePerfectTurkish(trLine)),
+              tr: fixedTr,
               romaja: existing.romaja || ''
             });
           } else {
@@ -1131,7 +1098,7 @@ CRITICAL RULES:
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V43 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle, hataları sıfırla ve cache'i onar)`
+        ? `God Mode V44 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle VE TÜM ÇEVİRİLERİ SIFIRLA)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
@@ -1162,12 +1129,26 @@ CRITICAL RULES:
       }
     };
 
+    // (V44) This is now a REAL full reset. Earlier versions only reset the
+    // Gemini/GTX/MyMemory cooldown timers here, never the translation
+    // cache itself - so a line that was already cached (even with broken
+    // GTX output) stayed exactly as-is forever, even after valid Gemini
+    // keys were added. Now: saving keys here clears the entire cache (in
+    // memory and in localStorage) so every visible line gets a genuine
+    // re-translation with whatever keys are currently set. A confirm()
+    // guards it since it means real API calls for every cached song.
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       try {
         const currentValue = geminiApiKeys.join(', ');
-        const input = prompt('🌟 Spicy Lyrics V43 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):', currentValue);
+        const input = prompt('🌟 Spicy Lyrics V44 🌟\nGemini API anahtarınızı/anahtarlarınızı girin (birden fazlaysa virgülle ayırın - her anahtarın kendi günlük kotası var, AMA SADECE farklı Google hesaplarındansa):\n\nOK\'e bastığınızda TÜM ÇEVİRİ ÖNBELLEĞİ SİLİNİR ve açık olan şarkılar yeniden çevrilir.', currentValue);
         if (input === null) return;
+
+        const cacheSize = cache.size;
+        if (cacheSize > 0) {
+          const confirmed = confirm(`Bu işlem önbellekteki ${cacheSize} satırlık çeviriyi tamamen silecek ve görünen şarkıları yeniden çevirecek (gerçek API/istek kullanımı anlamına gelir). Devam edilsin mi?`);
+          if (!confirmed) return;
+        }
 
         geminiApiKeys = Array.from(new Set(
           input.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
@@ -1179,14 +1160,17 @@ CRITICAL RULES:
         mmGloballyDownUntil = 0; mmBackoffStage = 0; mmConsecutiveFailures = 0; mmLastError = '';
         deadModels.clear();
         failedUntil.clear();
+        inFlight.clear();
+        needsRomajaRefetch.clear();
         saveBackoffState();
 
-        try {
-          repairCache();
-        } catch (e3) {
-          err('Cache onarımı sırasında beklenmeyen hata (cache onarımı atlandı):', e3);
-        }
-        updateDOMWithCache();
+        // (V44) THE ACTUAL FIX: wipe the translation cache so nothing
+        // stale survives the reset.
+        cache.clear();
+        try { localStorage.removeItem(STORAGE_CACHE_KEY); } catch (e4) {}
+        saveCache();
+
+        document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(el => el.remove());
 
         refreshToggleButtonVisual(btn);
         triggerMultiStageScan();
@@ -1208,7 +1192,7 @@ CRITICAL RULES:
     lineEls.forEach(lineEl => {
       const text = getCleanText(lineEl);
       if (!text || text === '•••') return;
-      if (looksTurkish(text)) return; // zaten Türkçe - çeviriye hiç gerek yok[cite: 17]
+      if (looksTurkish(text)) return; // zaten Türkçe - çeviriye hiç gerek yok
 
       if (!allVisibleTexts.includes(text)) {
         allVisibleTexts.push(text);
