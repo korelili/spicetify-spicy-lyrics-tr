@@ -16,7 +16,7 @@ Bring Turkish translations and easy-to-read pronunciations to your favorite song
 
 <a id="english"></a>
 
-## 🇬🇧 English
+## <img src="https://flagcdn.com/w40/gb.png" alt="United Kingdom flag" width="28" height="21"> English
 ### Understand the words. Stay in the music.
 
 **Spicy Lyrics AI Translator & Romaja** adds Turkish translations and romanized pronunciations beneath the original lyrics in **Spicy Lyrics**. Follow the song, discover what the words mean, and enjoy the original language—all in one beautiful view.
@@ -52,7 +52,7 @@ The button also displays translation mode and temporary availability information
 
 <a id="türkçe"></a>
 
-## 🇹🇷 Türkçe
+## <img src="https://flagcdn.com/w40/tr.png" alt="Türkiye flag" width="28" height="21"> Türkçe
 
 ### Sözleri anla. Müziğin içinde kal.
 
