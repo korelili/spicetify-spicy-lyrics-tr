@@ -16,7 +16,7 @@ Bring Turkish translations and easy-to-read pronunciations to your favorite song
 
 <a id="english"></a>
 
-## 🇬🇧 English
+## ![United Kingdom flag](https://flagcdn.com/24x18/gb.png) English
 
 ### Understand the words. Stay in the music.
 
@@ -41,7 +41,7 @@ Bring Turkish translations and easy-to-read pronunciations to your favorite song
 
 <a id="türkçe"></a>
 
-## 🇹🇷 Türkçe
+## ![Turkish flag](https://flagcdn.com/24x18/tr.png) Türkçe
 
 ### Sözleri anla. Müziğin içinde kal.
 
