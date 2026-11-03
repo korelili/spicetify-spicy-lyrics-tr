@@ -1,16 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 51.0.0
-// V51: reliable on/off control, isolated rendering, immediate request cancellation,
-// original Spicy Lyrics visuals restored while disabled. V50 request/cache protections retained.
+// VERSION: 52.0.0
+// V52: event capture and persistent runtime-owned toggle, safe cleanup after remounts;
+// V50+ Gemini request/cache protections retained.
 // Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV51() {
+(function spicyTurkishProV52() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V51]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V51]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V51]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V52]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V52]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V52]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -120,7 +120,7 @@
     lastTrackSwitchAt = Date.now();
     stats.trackSwitches++;
   }
-  window.__spicyTRDiagnostics = () => ({ version: '51.0.0', ...stats,
+  window.__spicyTRDiagnostics = () => ({ version: '52.0.0', enabled: isEnabled, ...stats,
     currentSong: currentSongId, cacheLines: cache.size,
     inFlightLines: inFlight.size, queueRunning,
     availableModels: GEMINI_MODELS.filter(m => geminiApiKeys.some(k => isGeminiComboReady(k, m))),
@@ -480,6 +480,22 @@
   `;
   document.getElementById('spicy-tr-style')?.remove();
   document.head.appendChild(style);
+  // A stale V47 may still be installed separately; keep the OFF visibility
+  // guard in an independently named stylesheet old versions do not know.
+  // An old instance can still spend API quota: uninstall duplicates.
+  const offGuardStyle = document.createElement('style');
+  offGuardStyle.id = 'spicy-tr-v52-off-guard';
+  offGuardStyle.textContent = `
+    html.spicy-tr-off #SpicyLyricsPage .spicy-tr-box,
+    html.spicy-tr-off #SpicyLyricsPage .spicy-tr-turkish,
+    html.spicy-tr-off #SpicyLyricsPage .spicy-tr-romaja,
+    body.spicy-tr-off #SpicyLyricsPage .spicy-tr-box { display: none !important; }
+    html.spicy-tr-off #SpicyLyricsPage .line:not(.musical-line) {
+      --BlurAmount: initial !important;
+    }
+  `;
+  document.getElementById(offGuardStyle.id)?.remove();
+  document.head.appendChild(offGuardStyle);
 
   function applyEnabledClass() {
     // Use both roots: older SpicyTR scripts may independently change BODY.
@@ -1294,6 +1310,7 @@ in the same order. No markdown, explanations or extra objects.`;
     if (!btn) return;
     btn.setAttribute('aria-pressed', String(isEnabled));
     btn.setAttribute('aria-label', isEnabled ? 'Türkçe çeviri ve romanizasyonu kapat' : 'Türkçe çeviri ve romanizasyonu aç');
+    btn.setAttribute('data-spicy-tr-state', isEnabled ? 'on' : 'off');
     const now = Date.now();
     const hasKeys = geminiApiKeys.length > 0;
     syncGeminiCooldown();
@@ -1306,7 +1323,7 @@ in the same order. No markdown, explanations or extra objects.`;
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && anyWarn ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
     if (!isEnabled) {
-      btn.title = 'SpicyTR V51 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
+      btn.title = 'SpicyTR V52 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
       return;
     }
 
@@ -1328,13 +1345,32 @@ in the same order. No markdown, explanations or extra objects.`;
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V51 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
+        ? `SpicyTR V52 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
-    btn.title = `[SpicyTR V51${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
+    btn.title = `[SpicyTR V52${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
   }
 
+  // The Spicy Lyrics controls are React-managed. A button-local onclick is
+  // unreliable if React remounts/replaces the controls between mousedown and
+  // click. Use one delegated, capture-phase handler for our owned button.
+  // It survives React replacing the toolbar and blocks ancestor click handlers.
   let ownedToggleButton = null;
+  const TOGGLE_OWNER = 'spicytr-52';
+  function handleToggleClick(event) {
+    if (disposed || !ownedToggleButton) return;
+    const target = event.target;
+    // An obsolete V47/V49 button may have appeared during an old observer
+    // callback. Route those clicks into V52 state rather than old onclick.
+    const clickedButton = target instanceof Element && target.closest('#spicy-tr-toggle-btn');
+    if (!clickedButton || !clickedButton.closest('#SpicyLyricsPage .ViewControls')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    setExtensionEnabled(!isEnabled, ownedToggleButton);
+  }
+  document.addEventListener('click', handleToggleClick, true);
+
   function setExtensionEnabled(next, btn) {
     if (disposed || next === isEnabled) return;
     isEnabled = next;
@@ -1353,51 +1389,38 @@ in the same order. No markdown, explanations or extra objects.`;
       applyEnabledClass();
     }
     refreshToggleButtonVisual(btn);
-    triggerRecalc();
-    if (isEnabled) triggerMultiStageScan();
+    // In addition to removing legacy .spicy-tr-box nodes, neutralize style
+    // leftovers and cancel every pending scan. A resize can remount the lyrics
+    // view, so only request it when translations are being re-enabled.
+    if (isEnabled) {
+      triggerRecalc();
+      triggerMultiStageScan();
+    }
   }
 
   function injectToggleButton() {
     const controls = document.querySelector('#SpicyLyricsPage .ViewControls');
     if (!controls) return;
 
-    let btn = document.getElementById('spicy-tr-toggle-btn');
-    // An earlier SpicyTR can leave a button with the SAME id behind.
-    // Refreshing that button would leave its old onclick bound to old state.
-    if (btn && btn !== ownedToggleButton) {
-      btn.remove();
-      btn = null;
-    }
-    if (btn && btn === ownedToggleButton) {
-      if (btn.parentElement !== controls) controls.appendChild(btn);
-      refreshToggleButtonVisual(btn);
-      return;
-    }
-    // A re-render of Spicy Lyrics may remove our control from the DOM.
-    // Reuse our own button if present instead of losing its click handler.
+    // Remove orphaned buttons from old script copies (including buttons that
+    // share an ID). Never reuse their attached event listeners or state.
+    document.querySelectorAll('#spicy-tr-toggle-btn').forEach(el => {
+      if (el !== ownedToggleButton) el.remove();
+    });
     if (ownedToggleButton) {
-      controls.appendChild(ownedToggleButton);
+      if (ownedToggleButton.parentElement !== controls) controls.appendChild(ownedToggleButton);
       refreshToggleButtonVisual(ownedToggleButton);
       return;
     }
 
-    btn = document.createElement('button');
+    const btn = document.createElement('button');
     btn.id = 'spicy-tr-toggle-btn';
     btn.type = 'button';
+    btn.dataset.spicyTrOwner = TOGGLE_OWNER;
     ownedToggleButton = btn;
     refreshToggleButtonVisual(btn);
-
-    btn.onclick = (event) => {
-      // Don't let Spicy Lyrics / React parent handlers consume this click.
-      event?.preventDefault?.();
-      event?.stopPropagation?.();
-      event?.stopImmediatePropagation?.();
-      try {
-        setExtensionEnabled(!isEnabled, btn);
-      } catch (e) {
-        err('Toggle butonu hata verdi:', e);
-      }
-    };
+    // Event delegation on document handles both native clicks and keyboard
+    // activation. No inline onclick: it is too easy to lose on DOM remount.
 
     // (V45) CRITICAL FIX: window.prompt()/confirm() DO NOT WORK inside
     // Spotify's CEF (Chromium Embedded Framework) runtime - calling them
@@ -1721,6 +1744,7 @@ in the same order. No markdown, explanations or extra objects.`;
     try { clearInterval(watchdogInterval); } catch (e) {}
     try { clearTimeout(batchTimer); } catch (e) {}
     try { window.removeEventListener('scroll', scrollHandler, true); } catch (e) {}
+    try { document.removeEventListener('click', handleToggleClick, true); } catch (e) {}
     try {
       if (Spicetify?.Player) {
         Spicetify.Player.removeEventListener('songchange', songChangeHandler);
@@ -1733,6 +1757,7 @@ in the same order. No markdown, explanations or extra objects.`;
     try { document.documentElement?.classList.remove('spicy-tr-off'); } catch (e) {}
     try { document.body.classList.remove('spicy-tr-off'); } catch (e) {}
     try { document.getElementById('spicy-tr-style')?.remove(); } catch (e) {}
+    try { offGuardStyle.remove(); } catch (e) {}
     try { ownedToggleButton?.remove(); } catch (e) {}
   };
 

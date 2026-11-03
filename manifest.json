@@ -1,10 +1,10 @@
 [
   {
     "name": "Spicy Lyrics AI Translator & Romaja",
-    "version": "51.0.0",
+    "version": "52.0.0",
     "readme": "README.md",
-    "description": "Request-efficient Gemini Turkish lyric translation, romanization, track-change cancellation, 429/503 backoff, and quality-first subtitles.",
-    "preview": "preview.png",
+    "description": "Turkish lyrics translation and romanization for Spicy Lyrics with an easy on/off switch and optional Gemini AI.",
+    "preview": "marketplace-icon.png",
     "main": "spicy-tr.js",
     "authors": [
       {
