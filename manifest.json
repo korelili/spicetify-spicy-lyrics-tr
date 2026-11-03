@@ -4,7 +4,7 @@
     "version": "52.0.0",
     "readme": "README.md",
     "description": "Turkish lyrics translation and romanization for Spicy Lyrics with an easy on/off switch and optional Gemini AI.",
-    "preview": "preview.png",
+    "preview": "marketplace-icon.png",
     "main": "spicy-tr.js",
     "authors": [
       {
@@ -20,6 +20,7 @@
       "romanization",
       "kpop",
       "ai"
-    ]
+    ],
+    "branch": "27e5ce2cc053c21926c5bcb659c1b341403952a2"
   }
 ]
