@@ -1,16 +1,62 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili (patched)
-// VERSION: 45.0.0 (Built on top of V44 — fixes the actual reason
-//           right-click+OK appeared to do NOTHING at all, on every
-//           version up to and including V44: window.prompt() and
-//           window.confirm() do not produce any visible dialog inside
-//           Spotify's CEF runtime. The code was calling them correctly,
-//           but there was never anything on screen to type a key into
-//           or click OK on - so entering keys silently never happened.
-//           Replaced with a real on-screen panel built on Spicetify's
-//           own supported Spicetify.PopupModal API.)
+// VERSION: 47.0.0 (Built on top of V46 — fixes why the extension looked
+//           "dead" (falling back to ugly GTX/MyMemory output) after only
+//           a couple of songs even with 4 Gemini API keys configured.)
 //
-// V45 - WHAT CHANGED AND WHY:
+// V47 - WHAT CHANGED AND WHY:
+//
+// THE ACTUAL BUG: every non-404 error from Gemini — including a 429
+// "quota exceeded, retry in 8h4m" and a 400 "invalid argument" repeated
+// byte-for-byte across all 4 keys — was being treated as a 45-SECOND
+// transient hiccup (MODEL_DEAD_SHORT_MS) and retried on that short a
+// timer forever. A daily quota error does not go away in 45 seconds,
+// and a 400 that is identical across 4 different API keys for the same
+// model is not a per-key fluke either — it means the request this
+// script sends is malformed for that particular model id, and retrying
+// it verbatim will fail every single time until the code changes.
+// Because all 16 key/model combinations kept re-failing on a 45s loop,
+// the "all combos currently dead" condition kept tripping almost
+// immediately, which is what pushed Gemini into its escalating global
+// backoff (30s -> 1m -> 2m -> 3m) after just a few scans — within a
+// song or two, exactly as reported.
+//
+// 1) 429 (QUOTA EXCEEDED) NOW RESPECTS THE REAL RETRY TIME: Gemini's
+//    own error response tells you exactly how long to wait (either a
+//    structured RetryInfo.retryDelay, or text like "Please retry in
+//    8h4m32s"). A new parseRetryDelayMs() reads that and the combo is
+//    now put on cooldown for the ACTUAL remaining time (capped at
+//    MODEL_DEAD_QUOTA_MAX_MS = 24h so a single bad parse can't wedge a
+//    combo forever), falling back to a 30-minute default only if the
+//    response genuinely doesn't say. This is the main fix: your 4 keys
+//    now round-robin properly instead of every key hammering an
+//    already-exhausted daily quota every 45 seconds.
+//
+// 2) 400 (INVALID ARGUMENT) IS NOW TREATED LIKE 404: a 400 is a
+//    request-format problem, not a server hiccup — if it fails for one
+//    key it will fail identically for all of them, so it's now marked
+//    dead for MODEL_DEAD_LONG_MS (6h) instead of 45s, the same as an
+//    unknown/retired model id. This stops the script from burning
+//    through its request budget retrying a combination that can
+//    mathematically never succeed without a code change. (If
+//    gemini-3.5-flash-lite keeps doing this for you specifically, it's
+//    worth double-checking that model id is actually valid/enabled for
+//    your key's tier — a 400 that's identical across 4 separate keys
+//    really does point at the model id, not your account.)
+//
+// 3) TIMEOUTS/NETWORK EXCEPTIONS NOW ALSO GET A SHORT COOLDOWN: a
+//    combo that times out (10s, no response) or throws a network-level
+//    error previously got NO cooldown at all, so the very next scan
+//    cycle could immediately retry the exact same struggling
+//    combination. It now gets the same MODEL_DEAD_SHORT_MS (45s)
+//    treatment as a 5xx, so a flaky combo backs off briefly instead of
+//    being hit again right away while other combos sit idle.
+//
+// None of this changes STORAGE_CACHE_KEY, your saved API keys, or when
+// the cache gets wiped (still only via the "Kaydet ve Sıfırla" button)
+// — this is purely about Gemini giving up on your keys too fast.
+//
+// V45 - WHAT CHANGED AND WHY (still included in this version):
 //
 // RIGHT-CLICK NOW OPENS A REAL VISIBLE PANEL: right-clicking the button
 // now calls Spicetify.PopupModal.display() with a text box for your
@@ -72,11 +118,11 @@
 // nobody's cache gets silently wiped just by installing this update;
 // it's only cleared when you explicitly use the reset button).
 
-(function spicyTurkishProV45() {
+(function spicyTurkishProV47() {
   const DEBUG = true;
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V45]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V45]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V45]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V47]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V47]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V47]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function fetchWithTimeout(url, options, timeoutMs) {
@@ -128,7 +174,9 @@
   const FAILURE_COOLDOWN_MS = 12000;
   const deadModels = new Map();
   const MODEL_DEAD_SHORT_MS = 45000;
-  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;  // 404 = wrong/retired model id, genuinely permanent until the model list is updated
+  const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;  // 404/400 = wrong/retired model id or a request shape this model rejects outright - genuinely permanent until the model list or request shape changes
+  const MODEL_DEAD_QUOTA_DEFAULT_MS = 30 * 60 * 1000;  // (V47) fallback cooldown for a 429 when we can't parse Gemini's own stated retry time
+  const MODEL_DEAD_QUOTA_MAX_MS = 24 * 60 * 60 * 1000;  // (V47) sanity cap even if the parsed/implied wait is absurdly long
 
   const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // 30s,1m,2m,3m
   let geminiGloballyDownUntil = 0;
@@ -550,6 +598,48 @@ function isNonLatin(text) {
     return t;
   }
 
+  // (V47) Reads Gemini's own stated quota-reset time out of a 429 response
+  // instead of guessing - either the structured RetryInfo.retryDelay field
+  // (e.g. "28952.5s") or the human-readable "...Please retry in 8h4m32s..."
+  // text Google also includes in error.message. Returns milliseconds, or
+  // null if neither form is present/parseable, so the caller can fall back
+  // to a sane default instead of a bare 45-second retry.
+  function parseRetryDelayMs(errJson, bodyMsg) {
+    try {
+      const details = errJson?.error?.details;
+      if (Array.isArray(details)) {
+        for (const d of details) {
+          if (d && typeof d.retryDelay === 'string') {
+            const m = /^([\d.]+)s$/.exec(d.retryDelay.trim());
+            if (m) return Math.ceil(parseFloat(m[1]) * 1000);
+          }
+        }
+      }
+    } catch (e) {}
+
+    if (bodyMsg) {
+      const m = /retry in\s+(?:([\d.]+)\s*h)?\s*(?:([\d.]+)\s*m)?\s*(?:([\d.]+)\s*s)?/i.exec(bodyMsg);
+      if (m && (m[1] || m[2] || m[3])) {
+        const h = parseFloat(m[1] || '0');
+        const min = parseFloat(m[2] || '0');
+        const s = parseFloat(m[3] || '0');
+        const ms = Math.ceil((h * 3600 + min * 60 + s) * 1000);
+        if (ms > 0) return ms;
+      }
+    }
+    return null;
+  }
+
+  function formatDuration(ms) {
+    const totalSec = Math.round(ms / 1000);
+    if (totalSec < 60) return `${totalSec}sn`;
+    const totalMin = Math.round(totalSec / 60);
+    if (totalMin < 60) return `${totalMin}dk`;
+    const h = Math.floor(totalMin / 60);
+    const min = totalMin % 60;
+    return min > 0 ? `${h}sa ${min}dk` : `${h}sa`;
+  }
+
   function renderSubtitles(lineEl, data, rawText) {
     const marker = `${data.tr || ''}\u0000${data.romaja || ''}`;
     let box = lineEl.querySelector('.spicy-tr-box');
@@ -680,8 +770,9 @@ CRITICAL RULES:
 
           if (!res.ok) {
             let bodyMsg = '';
+            let errJson = null;
             try {
-              const errJson = await res.clone().json();
+              errJson = await res.clone().json();
               bodyMsg = errJson?.error?.message || '';
             } catch (parseErr) {}
             geminiLastError = `[${model} ...${keyFp(apiKey)}] HTTP ${res.status}${bodyMsg ? ' - ' + bodyMsg : ''}`;
@@ -689,6 +780,22 @@ CRITICAL RULES:
             if (res.status === 404) {
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
               warn(`Model "${model}" bulunamadı (404, anahtar ...${keyFp(apiKey)}) - muhtemelen kaldırılmış/geçersiz model id, 6 saatliğine devre dışı bırakıldı`);
+            } else if (res.status === 400) {
+              // (V47) A 400 that repeats identically across every key for this
+              // model is a request-format problem, not a per-key fluke -
+              // retrying the exact same body on a 45s timer can never succeed,
+              // so treat it like a dead model id instead of a transient error.
+              deadModels.set(comboKey, Date.now() + MODEL_DEAD_LONG_MS);
+              warn(`Model "${model}" geçersiz istek döndürdü (400, anahtar ...${keyFp(apiKey)}) - istek bu model için hatalı biçimlenmiş olmalı, 6 saatliğine devre dışı bırakıldı: ${bodyMsg || '(sebep belirtilmedi)'}`);
+            } else if (res.status === 429) {
+              // (V47) Respect Gemini's own stated quota-reset time instead of
+              // retrying an exhausted daily quota every 45 seconds - this was
+              // the main reason 4 configured keys still looked "dead" within
+              // just a couple of songs.
+              const retryMs = parseRetryDelayMs(errJson, bodyMsg);
+              const waitMs = Math.min(retryMs || MODEL_DEAD_QUOTA_DEFAULT_MS, MODEL_DEAD_QUOTA_MAX_MS);
+              deadModels.set(comboKey, Date.now() + waitMs);
+              warn(`[${model} ...${keyFp(apiKey)}] kota doldu (429) - ${formatDuration(waitMs)} sonra bu kombinasyon tekrar denenecek${bodyMsg ? ': ' + bodyMsg : ''}`);
             } else {
               deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
               warn(`[${model} ...${keyFp(apiKey)}] geçici hata (HTTP ${res.status}) - ~${Math.round(MODEL_DEAD_SHORT_MS / 1000)}sn sonra bu kombinasyon tekrar denenecek${bodyMsg ? ': ' + bodyMsg : ''}`);
@@ -749,6 +856,16 @@ CRITICAL RULES:
             geminiLastError = `[${model} ...${keyFp(apiKey)}] zaman aşımı (10sn içinde cevap gelmedi)`;
           } else if (!geminiLastError || !geminiLastError.includes(model)) {
             geminiLastError = `[${model} ...${keyFp(apiKey)}] ${modelErr?.message || modelErr}`;
+          }
+          // (V47) A timeout/network-level failure previously got NO cooldown
+          // at all, so the very next scan could immediately retry the exact
+          // same struggling combo. Only set this if the !res.ok branch above
+          // didn't already set a more specific one (that branch sets its own
+          // cooldown before throwing, so blindly overwriting here would
+          // shorten a real 429/400 cooldown back down to 45s).
+          if ((deadModels.get(comboKey) || 0) <= Date.now()) {
+            deadModels.set(comboKey, Date.now() + MODEL_DEAD_SHORT_MS);
+            saveBackoffState();
           }
         }
       }
@@ -1120,7 +1237,7 @@ CRITICAL RULES:
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `God Mode V45 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle VE TÜM ÇEVİRİLERİ SIFIRLA)`
+        ? `God Mode V47 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık + OK: anahtarları düzenle VE TÜM ÇEVİRİLERİ SIFIRLA)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
   }
