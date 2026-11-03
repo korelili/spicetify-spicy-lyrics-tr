@@ -1,84 +1,73 @@
 <div align="center">
 
-# Spicy Lyrics TR
+# 🎶 Spicy Lyrics — Turkish Translation & Romanization
 
-### Spicy Lyrics için Türkçe çeviri ve romanizasyon desteği
+**Every lyric has a story. Feel it in your language.**
 
-Spotify masaüstünde şarkı sözlerini daha anlaşılır, daha okunabilir ve daha keyifli hale getiren yardımcı bir Spicetify eklentisi.
+Bring Turkish translations and easy-to-read pronunciations to your favorite songs, right inside Spotify.
 
-<img src="./preview.png" alt="Spicy Lyrics TR Preview" width="100%" />
+[**English**](#english) · [**Türkçe**](#türkçe)
+
+![Spicy Lyrics Turkish translation and romanization preview](./preview.png)
 
 </div>
 
 ---
 
-## Spicy Lyrics TR nedir?
+<a id="english"></a>
 
-**Spicy Lyrics TR**, Spicy Lyrics deneyimini Türkçe çeviri ve romanizasyon desteğiyle zenginleştirir.  
-Özellikle Korece, Japonca ve diğer yabancı dillerdeki şarkıları dinlerken; şarkı sözlerini takip etmeyi, anlamayı ve eşlik etmeyi çok daha kolay hale getirir.
+## 🇬🇧 English
 
-Orijinal sözleri korurken, ihtiyaç duyduğun yerde sana **Türkçe anlam** ve **okunuş desteği** sunar.
+### Understand the words. Stay in the music.
 
----
+**Spicy Lyrics AI Translator & Romaja** adds Turkish translations and romanized pronunciations beneath the original lyrics in **Spicy Lyrics**. Follow the song, discover what the words mean, and enjoy the original language—all in one beautiful view.
 
-## Neler yapabilir?
+### ✨ What makes it special?
 
-- **Türkçe çeviri** gösterir
-- **Romanizasyon / okunuş** desteği sunar
-- Orijinal sözleri koruyarak daha anlaşılır bir deneyim sağlar
-- Şarkı sözlerini daha temiz ve okunabilir bir görünümle destekler
-- Özellikle **K-pop**, **J-pop** ve yabancı dildeki parçaları takip etmeyi kolaylaştırır
+- **Three layers, one experience** — See the original lyrics, pronunciation guides for supported languages, and Turkish translations together.
+- **A little more meaning** — Choose optional AI-assisted translation for a more natural reading of the song's expressions and mood.
+- **Made to be readable** — Enjoy a clean, comfortable lyric display without covering the original words.
+- **Ready when you replay** — Previously translated lyrics can be remembered for a smoother listening experience.
 
----
+### 🎧 Start listening
 
-## Kimler için?
+1. Make sure **Spicy Lyrics** is installed in Spicetify.
+2. Open **Spicetify Marketplace → Extensions**, search for **Spicy Lyrics AI Translator & Romaja**, and install it.
+3. Open your lyrics and use the **TR / AI** button to show or hide translations. Right-click the button to set up the optional AI translation mode.
 
-Bu eklenti özellikle:
-
-- Yabancı şarkıların sözlerini anlamak isteyenler
-- Korece veya Japonca parçalarda okunuş desteğine ihtiyaç duyanlar
-- Spotify üzerinde daha zengin bir altyazı / lyrics deneyimi arayanlar
-- Spicy Lyrics'i Türkçe destekle kullanmak isteyenler
-
-için tasarlanmıştır.
+> **Good to know:** Basic translation works without an AI key. Optional AI translation uses your own Gemini API key. Translation and pronunciation availability can vary by song and language.
 
 ---
 
-## Kurulum
+<a id="türkçe"></a>
 
-### Spicetify Marketplace üzerinden
-Spicetify Marketplace içinde eklentiyi bulup kolayca kurabilirsiniz.
+## 🇹🇷 Türkçe
 
-### Manuel kurulum
-Bu depodaki dosyaları kullanarak eklentiyi manuel olarak da ekleyebilirsiniz.
+### Sözleri anla. Müziğin içinde kal.
 
-> Not: Bu eklenti, **Spicy Lyrics** ile birlikte çalışır.
+**Spicy Lyrics AI Translator & Romaja**, **Spicy Lyrics** üzerinde şarkı sözlerinin hemen altına Türkçe çeviriler ve Latin harfleriyle okunuşlar ekler. Orijinal sözleri kaybetmeden şarkıyı takip et, anlamını keşfet ve müziğin keyfini çıkar.
 
----
+### ✨ Neler sunuyor?
 
-## Kullanım
+- **Üç katman, tek deneyim** — Orijinal sözleri, desteklenen dillerde okunuşlarını ve Türkçe çevirilerini aynı anda gör.
+- **Sözlerin ardındaki anlam** — İsteğe bağlı yapay zekâ destekli çeviriyle ifadeleri ve şarkının duygusunu daha doğal şekilde keşfet.
+- **Göz yormayan görünüm** — Orijinal sözleri gizlemeyen, temiz ve rahat okunan bir şarkı sözü deneyimi yaşa.
+- **Tekrar dinlemeye hazır** — Daha önce çevrilen şarkıların sözleri hatırlanarak sonraki dinleyişlerde daha hızlı gösterilebilir.
 
-Kurulumdan sonra şarkı sözleri ekranında eklentiyi kullanmaya başlayabilirsiniz.  
-Desteklenen parçalarda:
+### 🎧 Dinlemeye başla
 
-- Türkçe çeviri
-- Romanizasyon / okunuş
-- Gelişmiş lyrics deneyimi
+1. Spicetify'da **Spicy Lyrics** eklentisinin kurulu olduğundan emin ol.
+2. **Spicetify Marketplace → Extensions** bölümünde **Spicy Lyrics AI Translator & Romaja** adını ara ve yükle.
+3. Şarkı sözlerini aç. **TR / AI** düğmesiyle çevirileri gösterip gizle; isteğe bağlı yapay zekâ çevirisini ayarlamak için düğmeye sağ tıkla.
 
-doğrudan Spicy Lyrics arayüzü içinde görüntülenir.
-
----
-
-## Amaç
-
-Spicy Lyrics TR’nin amacı çok basit:
-
-**Yabancı dildeki şarkıları dinlerken, sözleri hem görmek hem anlamak hem de daha rahat takip etmek.**
+> **Küçük bir not:** Temel çeviri için yapay zekâ anahtarı gerekmez. İsteğe bağlı yapay zekâ çevirisi kendi Gemini API anahtarınla çalışır. Çeviri ve okunuş desteği şarkıya ve dile göre değişebilir.
 
 ---
 
 <div align="center">
 
-Made with love for Spicy Lyrics users 🎵
+**Made for music lovers · Müzik tutkunları için** 💚
+
+Created by [**@korelili**](https://github.com/korelili)
 
 </div>
