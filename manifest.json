@@ -1,9 +1,9 @@
 [
   {
     "name": "Spicy Lyrics AI Translator & Romaja",
-    "version": "48.0.0",
+    "version": "49.0.0",
     "readme": "README.md",
-    "description": "Simultaneous Romanization (Romaja) and Context-Aware / Gemini AI Turkish Translations right below Spicy Lyrics lines, just like YouTube Music Better Lyrics! Right-click the button to add your Gemini key(s) and fully reset the translation cache.",
+    "description": "Quality-first Gemini Turkish lyrics translation with romanization, idiomatic safeguards, controlled fallback and honest status diagnostics.",
     "preview": "marketplace-icon.png",
     "main": "spicy-tr.js",
     "authors": [

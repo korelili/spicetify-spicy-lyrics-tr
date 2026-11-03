@@ -1,15 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 48.0.0
-// Marketplace maintenance: safer Gemini failures, model/key fallback, cache upgrades.
+// VERSION: 49.0.0
+// Quality-first lyrics: smaller Gemini requests, lyric context, short-phrase safeguards,
+// trustworthy AI-mode display, self-healing fallback cache and honest version diagnostics.
 // Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV48() {
+(function spicyTurkishProV49() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V48]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V48]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V48]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V49]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V49]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V49]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   const activeRequestControllers = new Set();
@@ -75,10 +76,10 @@
   const MODEL_DEAD_QUOTA_DEFAULT_MS = 30 * 60 * 1000;
   const MODEL_DEAD_QUOTA_MAX_MS = 24 * 60 * 60 * 1000;
   const MODEL_CONFIG_COOLDOWN_MS = 10 * 60 * 1000;
-  const GEMINI_TIMEOUT_MS = 25000;
-  const GEMINI_ATTEMPTS_PER_BATCH = 5; // Avoid 16 failed API calls per lyric batch.
-  const GEMINI_BATCH_TIME_BUDGET_MS = 55000; // Do not stall an entire song on timeouts.
-  const FALLBACK_UPGRADE_INTERVAL_MS = 15 * 60 * 1000;
+  const GEMINI_TIMEOUT_MS = 30000;
+  const GEMINI_ATTEMPTS_PER_BATCH = 3; // Avoid 16 failed API calls per lyric batch.
+  const GEMINI_BATCH_TIME_BUDGET_MS = 58000; // Do not stall an entire song on timeouts.
+  const FALLBACK_UPGRADE_INTERVAL_MS = 3 * 60 * 1000;
   const modelCooldowns = new Map(); // 400 after safe retry: affects model/config, not each key.
   const keyCooldowns = new Map();   // 401/403: affects key, not all models.
   const simpleModels = new Set();   // Models that need a simpler response config.
@@ -166,6 +167,10 @@
   ];
 
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
+  // An accurate but temporarily missing lyric is better than a misleading mistranslation.
+  // Applies when Gemini keys exist. Users may opt into GTX/MyMemory in settings.
+  const QUALITY_MODE_KEY = 'spicy_tr_quality_first_v49';
+  let qualityMode = localStorage.getItem(QUALITY_MODE_KEY) !== 'false';
   let batchTimer = null;
 
   const GEMINI_KEYS_STORAGE = 'spicy_tr_gemini_keys';
@@ -186,8 +191,8 @@
   }
   localStorage.removeItem('spicy_tr_gemini_key');
 
-  const MAX_LINES_PER_GEMINI_CALL = 30;
-  const GEMINI_MAX_OUTPUT_TOKENS = 8192;
+  const MAX_LINES_PER_GEMINI_CALL = 8;
+  const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 
   // No raw API keys, even a short hash, are persisted in cache/backoff keys.
   // A stable (non-cryptographic) fingerprint avoids last-six-character collisions.
@@ -234,8 +239,8 @@
   function canUpgradeFallback(text, now = Date.now()) {
     const item = cache.get(text);
     return geminiApiKeys.length > 0 && item &&
-      (item.source === 'gtx' || item.source === 'mymemory') &&
-      (item.nextGeminiAt || 0) <= now && nextGeminiAvailableAt() <= Date.now();
+      (!item.tr || ['gtx', 'mymemory', 'legacy', 'glossary'].includes(item.source)) &&
+      (item.nextGeminiAt || 0) <= now && nextGeminiAvailableAt() <= now;
   }
 
   function markFailed(text, cooldownMs) {
@@ -244,9 +249,15 @@
 
   function saveCache() {
     try {
-      const entries = Array.from(cache.entries())
-        .filter(([, v]) => v && (v.tr || v.romaja))
-        .slice(-6000);
+      // In AI mode, never persist an untrusted machine translation as if it were final.
+      // Keep romanization, Gemini lyrics and curated idioms across launches.
+      const entries = Array.from(cache.entries()).map(([k, v]) => {
+        if (!v || (!v.tr && !v.romaja)) return null;
+        if (geminiApiKeys.length && !['gemini', 'glossary'].includes(v.source)) {
+          return v.romaja ? [k, { romaja: v.romaja, tr: '', source: 'romanization' }] : null;
+        }
+        return [k, v];
+      }).filter(Boolean).slice(-6000);
       localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
     } catch (e) {}
   }
@@ -273,7 +284,6 @@
     if (srcTokens.length < 2) return false;
     const trTokens = translated.trim().split(/\s+/).filter(Boolean);
     if (trTokens.length === 0) return false;
-    if (trTokens.length === 1 && translated.length >= 10) return true;
     if (trTokens.some(t => t.replace(/[^a-zçğıöşüA-ZÇĞİÖŞÜ]/g, '').length > 22)) return true;
     return false;
   }
@@ -282,6 +292,12 @@
     let fixed = 0, purged = 0, reformalFixed = 0, turkishPurged = 0, gluedPurged = 0;
     for (const [rawLine, data] of Array.from(cache.entries())) {
       if (!data) continue;
+      if (data.tr && !data.source) {
+        data.source = 'legacy';
+        data.nextGeminiAt = 0;
+        cache.set(rawLine, data);
+        reformalFixed++;
+      }
 
       if (looksTurkish(rawLine)) {
         cache.delete(rawLine);
@@ -501,72 +517,42 @@ function isNonLatin(text) {
     return (clone.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
+  // V49: Never rewrite suffixes with blanket regexes; they mutated valid Turkish
+  // nouns/verbs and silently degraded both AI and fallback translations.
   function forcePerfectTurkish(text) {
     if (!text) return '';
-    let t = text.trim();
+    const t = String(text).replace(/\s+/g, ' ').trim();
+    return t ? t[0].toLocaleUpperCase('tr-TR') + t.slice(1) : '';
+  }
 
-    t = t.replace(/\bVücudunuz\b/gi, 'Vücudun')
-         .replace(/\bbelirtin\b/gi, 'söyle')
-         .replace(/\bGözleriniz\b/gi, 'Gözlerin')
-         .replace(/\bZihniniz\b/gi, 'Zihnin')
-         .replace(/\bSizin\b/gi, 'Senin')
-         .replace(/\bSize\b/gi, 'Sana')
-         .replace(/\bSizi\b/gi, 'Seni')
-         .replace(/\bSizde\b/gi, 'Sende')
-         .replace(/\bSizden\b/gi, 'Senden')
-         .replace(/\bSizce\b/gi, 'Sence');
-
-    t = t.replace(/^Bebek$/gi, 'Bebeğim')
-         .replace(/\bBebek\b/gi, 'Bebeğim')
-         .replace(/Rap boku/gi, 'Rap');
-
-    t = t.replace(/\bSiz\b/gi, 'Sen');
-
-    t = t.replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inize\b/g, '$1ine')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınıza\b/g, '$1ına')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüze\b/g, '$1üne')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuza\b/g, '$1una')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inizi\b/g, '$1ini')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınızı\b/g, '$1ını')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzü\b/g, '$1ünü')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzu\b/g, '$1unu')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inizde\b/g, '$1inde')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınızda\b/g, '$1ında')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzde\b/g, '$1ünde')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzda\b/g, '$1unda')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inizden\b/g, '$1inden')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınızdan\b/g, '$1ından')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzden\b/g, '$1ünden')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzdan\b/g, '$1undan')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inizin\b/g, '$1inin')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınızın\b/g, '$1ının')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzün\b/g, '$1ünün')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzun\b/g, '$1unun')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)inizle\b/g, '$1inle')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ınızla\b/g, '$1ınla')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)ünüzle\b/g, '$1ünle')
-         .replace(/([a-zçğıöşüA-ZÇĞİÖŞÜ]+)unuzla\b/g, '$1unla');
-
-    t = t.replace(/\bmusunuz\b/gi, 'musun')
-         .replace(/\bmüsünüz\b/gi, 'müsün')
-         .replace(/\bmısınız\b/gi, 'mısın')
-         .replace(/\bmisiniz\b/gi, 'misin');
-
-    t = t.replace(/\bdevam edin\b/gi, 'devam et')
-         .replace(/\bgevşetin\b/gi, 'gevşet')
-         .replace(/\bkeşfedin\b/gi, 'keşfet')
-         .replace(/\bçevirin\b/gi, 'çevir')
-         .replace(/\bbırakın\b/gi, 'bırak')
-         .replace(/\bunutmayın\b/gi, 'unutma')
-         .replace(/\bhissedin\b/gi, 'hisset')
-         .replace(/\bizleyin\b/gi, 'izle')
-         .replace(/\bdinleyin\b/gi, 'dinle')
-         .replace(/\bhatırlayın\b/gi, 'hatırla')
-         .replace(/\btutun\b/gi, 'tut');
-
-    t = t.replace(/[.?]+$/, '');
-    if (t.length > 0) t = t.charAt(0).toUpperCase() + t.slice(1);
-    return t;
+  // Very small, language-generic colloquial safeguard for recurring short lyrics.
+  // This is NOT a whole-song hardcoded translation database. Gemini supersedes it.
+  const SAFE_COLLOQUIAL_PHRASES = new Map([
+    ['talk to me', 'Benimle konuş'],
+    ['tell me', 'Söyle bana'],
+    ['tell me whats on your mind', 'Aklından geçenleri söyle bana'],
+    ['whats on your mind', 'Aklından ne geçiyor'],
+    ['here i am baby', 'İşte buradayım, bebeğim'],
+    ['well here i am baby', 'İşte buradayım, bebeğim'],
+    ['if you want it', 'İstersen']
+  ]);
+  function cleanPhrase(s) {
+    return String(s || '').toLowerCase().replace(/['’‘]/g, '')
+      .replace(/[.,!?;:()"'\-]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function getSafeColloquialTranslation(rawLine) {
+    const phrases = String(rawLine || '').split(/\s*,\s*/).map(cleanPhrase);
+    if (!phrases.length || phrases.some(p => !SAFE_COLLOQUIAL_PHRASES.has(p))) return '';
+    // A very long repeated ad-lib is intentionally not forced into a fixed phrase.
+    if (phrases.length > 5) return '';
+    return phrases.map(p => SAFE_COLLOQUIAL_PHRASES.get(p)).join(', ');
+  }
+  function isUsableTranslation(original, translated) {
+    if (!translated || normalize(original) === normalize(translated)) return false;
+    if (looksGluedTranslation(original, translated)) return false;
+    if (/<[^>]*>|&(?:#\d+|[a-z]+);/i.test(translated)) return false;
+    if (cleanPhrase(original).includes('talk to me') && /konuşma cihaz/i.test(translated)) return false;
+    return true;
   }
 
   // Google quota errors provide RetryInfo.retryDelay (seconds) and/or a
@@ -607,7 +593,7 @@ function isNonLatin(text) {
   }
 
   function renderSubtitles(lineEl, data, rawText) {
-    const marker = `${data.tr || ''}\u0000${data.romaja || ''}`;
+    const marker = `${data.tr || ''}\u0000${data.romaja || ''}\u0000${data.source || ''}\u0000${qualityMode ? 'strict' : 'all'}`;
     let box = lineEl.querySelector('.spicy-tr-box');
     if (box && box.dataset.marker === marker) return;
     if (box) box.remove();
@@ -623,7 +609,9 @@ function isNonLatin(text) {
       box.appendChild(romEl);
     }
 
-    if (data.tr && data.tr.toLowerCase() !== rawText.toLowerCase()) {
+    const isTrusted = data.source === 'gemini' || data.source === 'glossary';
+    const showTr = !qualityMode || geminiApiKeys.length === 0 || isTrusted;
+    if (showTr && data.tr && data.tr.toLowerCase() !== rawText.toLowerCase()) {
       const trEl = document.createElement('div');
       trEl.className = 'spicy-tr-turkish';
       trEl.textContent = data.tr;
@@ -663,43 +651,37 @@ function isNonLatin(text) {
   async function translateChunkWithGemini(chunkLines, allSongLines, epoch) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
-    const contextLinesText = allSongLines.map(l => `- ${l}`).join('\n').slice(0, 15000);
+    // Keep context small to avoid 30-line requests timing out, but include surrounding lyrics.
+    const firstIndex = Math.max(0, allSongLines.indexOf(chunkLines[0]));
+    const endIndex = Math.max(firstIndex, allSongLines.indexOf(chunkLines[chunkLines.length - 1]));
+    const contextLinesText = allSongLines.slice(Math.max(0, firstIndex - 5), endIndex + 6)
+      .map(l => `- ${l}`).join('\n').slice(0, 3500);
     const targetLinesText = chunkLines.map((l, i) => `${i + 1}. ${l}`).join('\n');
+    const prompt = `You are a professional English/Korean/Japanese/Chinese/Thai to Turkish song lyric localizer.
+Song: ${songTitle} — ${artist}
 
-    const prompt = `You are Turkey's ultimate music translator localizing song lyrics into natural Turkish.
-Song: "${songTitle}" by "${artist}"
-
-FULL LYRICS OF THIS SONG, for context only (story, tone, emotional arc, who's speaking to whom). Do NOT output anything for these lines - they exist only so your translation of the numbered lines below stays consistent with the whole song's meaning:
+Surrounding lyrics (context only; do not translate these as extra lines):
 ${contextLinesText}
 
-Now translate the following ${chunkLines.length} numbered lines, in order:
+Translate EXACTLY these ${chunkLines.length} numbered lines, preserving their order:
 ${targetLinesText}
 
-CRITICAL RULES:
-1. ALWAYS INFORMAL "SEN", NEVER FORMAL "SİZ" - no exceptions, in any language the source is in. This applies to every verb ending and every possessive, not just the pronoun itself.
-   WRONG (formal - never output anything like this): "Ters çevirin", "gevşetin", "keşfedin", "devam edin", "Kalbinize", "düğmelerinizi", "yerlerinizi", "Siz farkına bile varmadan", "görüş alanınızdadır", "sabahınızı"
-   RIGHT (informal - always output like this instead): "Ters çevir", "gevşet", "keşfet", "devam et", "Kalbine", "düğmelerini", "yerlerini", "Sen farkına bile varmadan", "görüş alanındadır", "sabahını"
-2. NO LINE SKIP OR SHIFT: your JSON array MUST contain exactly ${chunkLines.length} objects, one per numbered line above, in the exact same order - including lines that are already in English, already seem simple/understandable, or match the song's title. Never leave a line as-is just because it "already makes sense" - every line gets its own real Turkish translation.
-3. REPEATED/STYLIZED AD-LIBS: if a line is a rhythmic ad-lib or vocalization using repetition (e.g. "On&on&on&on oh", "La la la la"), do NOT translate each repeated token as a separate literal word for the "tr" field - treat the whole repeated pattern as one vocal/rhythmic unit and either keep it as a natural-sounding vocal ad-lib or give one single natural Turkish equivalent for the whole thing, never a word-by-word literal mess.
-3b. FULL CONTEXTUAL LOCALIZATION, NOT LITERAL TRANSLATION: you are localizing, not translating word-by-word. Read each line in light of the whole song's story/mood (given above) and render what it MEANS and FEELS like in natural, idiomatic Turkish - never a stiff, dictionary-literal rendering that reads like a translation. Specifically:
-   - IDIOMS: translate the idiom's actual function/meaning, never word-for-word. "Hold your horses" means "wait/slow down, be patient" - find the Turkish expression that does that job ("acele etme", "sakin ol"), not a literal horse reference.
-   - EXPLICITNESS AND REGISTER MUST MATCH EXACTLY, WITH TODAY'S SLANG: if the source line is vulgar, crude, or sexually explicit, your Turkish must be equally direct and explicit, using the actual CONTEMPORARY Turkish word/slang for it - never an outdated, euphemistic, or softened stand-in just because the word is crude. A toned-down or old-fashioned translation of an explicit line is a WRONG translation, not a safer one.
-     WRONG (dated, softened euphemism): "Çünkü kimse seni benim gibi beceremez" for "'cause no one fucks you like I do"
-     RIGHT (direct, current, matches the source's register): "Çünkü kimse seni benim gibi sikemez"
-     This isn't about this one example - it's the general rule: always reach for the real, current Turkish word for whatever's explicit in the source, never a stiffer or quainter stand-in. Match playful lines playfully, intimate lines intimately, aggressive lines aggressively.
-   - NONSENSE / INVENTED HOOK PHRASES: pop lyrics sometimes use made-up or sound-driven phrases with no literal real-world meaning (a title hook built from onomatopoeia or wordplay, e.g. "Bubble pop electric"). Do NOT attempt a literal word-for-word unpacking of these - it produces nonsense, not a translation.
-     WRONG (literal, reads as a mistranslation): "Elektrikli baloncuk patlaması" for "Bubble pop electric"
-     RIGHT: a short, natural-sounding Turkish phrase that captures the ENERGY/VIBE of the hook, or - when no Turkish rewrite actually improves on it - keep the stylized English phrase as-is, the way Turkish listeners already hear it.
-   - Prefer Turkish's own reduplicated intensifiers where they fit naturally ("masmavi" rather than "çok mavi", "bembeyaz" rather than "çok beyaz", "güpegündüz" for broad daylight), and generally favor an evocative, idiomatic phrase over a technically-accurate-but-stiff one, as long as the core meaning is preserved.
-3c. TITLE / HOOK LINES: a line that IS or closely matches the song's own title (given above as "Song:"), or a repeated stylized hook built from mixed fragments, will not translate sensibly word-for-word - see the nonsense/hook guidance in rule 3b above. For these, give a short, natural-sounding Turkish phrase that captures the vibe/mood of the hook instead, the way a Turkish cover or localized title would read.
-4. ROMANIZATION IS MANDATORY for every line not already in Latin script - NEVER leave "rom" empty for Korean, Japanese, Chinese, Thai, or any other non-Latin script, even when a perfectly clean version is hard to produce. Always give your best simple phonetic attempt instead of skipping it. (Only use an empty string for "rom" when the line is ALREADY in Latin script.)
-   STYLE: keep it casual and readable, the way an ordinary person types out pronunciation online. Standard single accent marks from an established system are fine. AVOID heavy academic/IAST-style transliteration with multiple stacked diacritics per letter.
-   SPACING IS MANDATORY AND NON-NEGOTIABLE, EVEN FOR AD-LIBS: always put a space between EVERY romanized word exactly the way the original line's words/tokens are separated - this applies even when rule 3 tells you to compress a repeated ad-lib into one natural phrase for "tr". The "rom" field must still spell out each repeated unit separated by spaces (e.g. source "마 마 마 마 마 마" -> rom "ma ma ma ma ma ma", never "mamamamamama"). NEVER concatenate several words or repeated units into one unbroken string under any circumstance.
-5. COMPLETE, PROPERLY CONJUGATED SENTENCES: every translated line must read as a natural, grammatically complete Turkish sentence or fragment with a correctly conjugated verb matching who is actually speaking or being addressed in that line. NEVER end a line on a bare infinitive ("-mak/-mek" as the line's main verb) when it needs to be a finite verb, and NEVER use a bare imperative when the source line is a first-person statement, not a command.
-   WRONG: "...telefonunu aramak" (bare infinitive used as if it were the whole sentence) for a line that means "I'm calling your phone" -> RIGHT: "...telefonunu arıyorum"
-   WRONG: "Ama iyiymişim gibi davran" (imperative "act!", addressed to someone else) for a line that means "I act like I'm fine" -> RIGHT: "Ama iyiymişim gibi davranıyorum"
-   Only use an imperative form when the source line is itself genuinely phrased as a command/instruction.
-6. OUTPUT FORMAT: respond with ONLY a JSON array matching the given schema - exactly ${chunkLines.length} objects, in the same order as the numbered lines above. Each object has "rom" (romanization, or "" if the line is already Latin script) and "tr" (the natural Turkish translation using informal "sen", per rule 1). No extra text, no markdown, no numbering in the output - just the array.`;
+Translate the meaning, not individual dictionary words. Write natural, colloquial, idiomatic,
+flowing Turkish as in a professionally localized song. Address the listener using informal "sen",
+never formal "siz". Infer the speaker, addressee, tense, implied verbs and line fragments from
+context. Preserve metaphors, sexual implications, humor, slang and intensity without sanitizing.
+Avoid stiff literalism and nonsensical sound-alikes. For example:
+"Talk to me" means "Benimle konuş", NEVER "Konuşma cihazı".
+"Tell me what's on your mind" means "Aklından geçenleri söyle bana".
+"You say you want a good time" means "Güzel vakit geçirmek istediğini söylüyorsun".
+"That's what I like" means "Benim sevdiğim şey de bu" (not an awkward dictionary phrase).
+"Silk sheets and diamonds, all white" means both sheets and diamonds are white; keep the imagery.
+If a line is grammatically incomplete, translate it naturally as part of its context.
+Don't insert new details or reverse the meaning. Never replace explicit speech with euphemisms.
+For Hangul/Kanji/Hiragana/Katakana/Thai/Cyrillic etc, also supply readable, space-separated
+Latin romanization in "rom". For Latin-script lines, "rom" must be "".
+Only return a JSON array of EXACTLY ${chunkLines.length} objects; each {"tr":"...","rom":"..."},
+in the same order. No markdown, explanations or extra objects.`;
 
     let lastError = new Error('Gemini kombinasyonları şu an kullanılamıyor');
     const keyCount = geminiApiKeys.length;
@@ -711,7 +693,7 @@ CRITICAL RULES:
     const requestBody = (simple) => ({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.2,
+        // No temperature override: current Gemini 3.x guidance prefers model defaults.
         maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
         responseMimeType: 'application/json',
         ...(!simple ? { responseSchema: {
@@ -800,15 +782,14 @@ CRITICAL RULES:
             .filter(p => !p?.thought && typeof p?.text === 'string')
             .map(p => p.text).join('');
           const parsed = parseGeminiJsonArray(rawOutput, chunkLines.length);
-          if (!parsed) throw new Error('Gemini JSON geçersiz veya satır sayısı uyuşmuyor');
+          if (!parsed) throw new Error(`Gemini JSON geçersiz / satır sayısı uyuşmuyor (finishReason=${json?.candidates?.[0]?.finishReason || 'unknown'})`);
           if (epoch !== generationId) throw new Error('İstek iptal edildi');
 
           chunkLines.forEach((rawLine, i) => {
             const item = parsed[i];
             if (!item || typeof item.tr !== 'string' || !item.tr.trim()) return;
             const cleanTr = fixGluedWords(forcePerfectTurkish(item.tr.trim()));
-            if (normalize(cleanTr) === normalize(rawLine)) return;
-            if (looksGluedTranslation(rawLine, cleanTr)) return;
+            if (!isUsableTranslation(rawLine, cleanTr)) return;
             let cleanRom = '';
             if (isNonLatin(rawLine)) {
               const romRaw = typeof item.rom === 'string' ? item.rom.trim() : '';
@@ -939,7 +920,7 @@ CRITICAL RULES:
           const cleanRomaja = isNonLatin(rawText) ? fixGluedWords(romaja) : '';
           const fixedTr = fixGluedWords(forcePerfectTurkish(trLine));
           // (V44) reject obviously glued GTX output instead of caching/showing it
-          const useTr = !adlib && trLine && normalize(trLine) !== normalize(rawText) && !looksGluedTranslation(rawText, fixedTr);
+          const useTr = !adlib && isUsableTranslation(rawText, fixedTr);
           const gotSomethingNew = useTr || (cleanRomaja && !existing.romaja);
 
           if (gotSomethingNew) {
@@ -1073,7 +1054,7 @@ CRITICAL RULES:
           const fixedTr = fixGluedWords(forcePerfectTurkish(trLine));
 
           // (V44) reject obviously glued MyMemory output instead of caching/showing it
-          if (trLine && normalize(trLine) !== normalize(rawText) && !looksGluedTranslation(rawText, fixedTr)) {
+          if (isUsableTranslation(rawText, fixedTr)) {
             mmConsecutiveFailures = 0;
             mmGloballyDownUntil = 0;
             mmBackoffStage = 0;
@@ -1129,7 +1110,7 @@ CRITICAL RULES:
     const epoch = generationId;
     const now = Date.now();
     let missing = allVisibleLines.filter(t =>
-      (!cache.has(t) || canUpgradeFallback(t, now)) &&
+      (!cache.get(t)?.tr || canUpgradeFallback(t, now)) &&
       !inFlight.has(t) && (failedUntil.get(t) || 0) <= now
     );
     if (missing.length === 0) return;
@@ -1153,8 +1134,17 @@ CRITICAL RULES:
         if (epoch !== generationId || !isEnabled) return;
         // Do not replace usable fallback text with another weaker fallback.
         const needsFallback = leftover.filter(l => !cache.get(l)?.tr);
-        if (needsFallback.length > 0 && Date.now() >= gtxGloballyDownUntil) {
-          await translateWithGTXPerLine(prioritizeByActive(needsFallback, allVisibleLines, activeText), epoch);
+        for (const rawLine of needsFallback) {
+          const safe = getSafeColloquialTranslation(rawLine);
+          if (safe && !cache.get(rawLine)?.tr) {
+            const existing = cache.get(rawLine) || {};
+            cache.set(rawLine, { ...existing, tr: safe, source: 'glossary',
+              nextGeminiAt: Date.now() + FALLBACK_UPGRADE_INTERVAL_MS });
+          }
+        }
+        const stillNeedsGTX = needsFallback.filter(l => !cache.get(l)?.tr);
+        if (stillNeedsGTX.length > 0 && Date.now() >= gtxGloballyDownUntil) {
+          await translateWithGTXPerLine(prioritizeByActive(stillNeedsGTX, allVisibleLines, activeText), epoch);
         }
         if (epoch !== generationId || !isEnabled) return;
         let stillMissing = group.filter(l => !cache.get(l)?.tr);
@@ -1216,9 +1206,10 @@ CRITICAL RULES:
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V48 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: anahtarları düzenle / Kaydet ve Sıfırla)`
+        ? `SpicyTR V49 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: anahtarları düzenle / Kaydet ve Sıfırla)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
+    btn.title = `[SpicyTR V49${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title}${qualityMode && hasKeys && geminiDown ? ' · Zayıf yedek çeviriler kasıtlı olarak gizleniyor.' : ''}`;
   }
 
   function injectToggleButton() {
@@ -1334,6 +1325,20 @@ CRITICAL RULES:
       textarea.style.fontSize = '12px';
       wrap.appendChild(textarea);
 
+      const qualityLabel = document.createElement('label');
+      qualityLabel.style.display = 'flex';
+      qualityLabel.style.gap = '9px';
+      qualityLabel.style.alignItems = 'flex-start';
+      qualityLabel.style.fontSize = '12px';
+      const qualityInput = document.createElement('input');
+      qualityInput.type = 'checkbox';
+      qualityInput.checked = qualityMode;
+      qualityLabel.appendChild(qualityInput);
+      const qualityText = document.createElement('span');
+      qualityText.textContent = 'Kalite modu: Gemini anahtarım varsa yalnızca AI ve güvenilir kısa ifadeleri göster; zayıf GTX/MyMemory çevirilerini gizle (romanizasyon devam eder).';
+      qualityLabel.appendChild(qualityText);
+      wrap.appendChild(qualityLabel);
+
       const warnText = document.createElement('div');
       warnText.style.fontSize = '12px';
       warnText.style.opacity = '0.75';
@@ -1368,6 +1373,8 @@ CRITICAL RULES:
       const saveBtn = mkBtn('Kaydet ve Sıfırla', true);
       saveBtn.onclick = () => {
         try {
+          qualityMode = qualityInput.checked;
+          localStorage.setItem(QUALITY_MODE_KEY, String(qualityMode));
           applyNewKeysAndFullReset(textarea.value);
         } catch (eSave) {
           err('Anahtar kaydetme/sıfırlama hata verdi:', eSave);
@@ -1420,11 +1427,9 @@ CRITICAL RULES:
       }
 
       if (cache.has(text)) {
-        if (!lineEl.querySelector('.spicy-tr-box')) {
-          renderSubtitles(lineEl, cache.get(text), text);
-        }
+        renderSubtitles(lineEl, cache.get(text), text);
       }
-      if ((!cache.has(text) || canUpgradeFallback(text)) &&
+      if ((!cache.get(text)?.tr || canUpgradeFallback(text)) &&
           !inFlight.has(text) && (failedUntil.get(text) || 0) <= Date.now()) {
         hasMissing = true;
       }

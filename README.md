@@ -1,70 +1,57 @@
-# Spicy Lyrics AI Translator & Romaja
+# Spicy Lyrics AI Translator & Romaja — v49.0.0
 
-**Turkish translations and romanized pronunciation, right below the original lyrics.** A companion extension for [Spicy Lyrics](https://spicylyrics.org/) on Spotify Desktop.
+A Turkish lyrics and romanization extension for [Spicy Lyrics](https://spicylyrics.org/) in Spotify Desktop / Spicetify.
 
-**Available on Spicetify Marketplace · v48.0.0**
+![Preview](marketplace-icon.png)
 
-![Extension preview](preview.png)
+## What's changed in V49
 
-## Features
+- **Gemini translation requests:** 30 → 8 lines per request, shorter context-aware translation instructions, 30-second request timeout, 3-attempt budget per group, less aggressive output token cap. This reduces the risk of repeated timeouts, but cannot override API quotas or guarantee speed.
+- **More natural Turkish:** lyric-localization prompt emphasizes speaker, idiom, tone, semantic meaning and context rather than literal word-for-word translation.
+- **Quality-first mode (default with a Gemini key):** When Gemini is unavailable, the extension hides low-confidence Google Translate / MyMemory Turkish subtitle text instead of showing it as a reliable translation. **Romanization stays visible** when available. A handful of common, unambiguous colloquial phrases may still be shown as verified short translations.
+- **Toggle quality mode:** Right-click the `AI` button to find the quality-mode checkbox. Turn it **off** if you prefer to see all fallback translations while Gemini is unavailable. Saving currently resets the cache, as it did in V48.
+- **Stale cache handling:** Old entries with unknown translation origin are not assumed to be AI quality. In AI mode, weak fallback Turkish output isn't saved permanently; existing fallback rows can be upgraded later when Gemini is available. Gemini results and usable romanization remain cached.
+- **Romanization and UI:** Original on-screen lyrics, Hangul / Kana / Han / Thai romanization, on/off control, API key settings and other original features are retained.
+- **No risky Turkish suffix rewriting:** The previous broad regex substitutions could silently damage valid sentence endings. V49 leaves grammar choices to the translator.
+- **Status and version:** Hover over the `AI` / `TR` button; the tooltip begins with `[SpicyTR V49...]`. Note: `AI` means a Gemini key is configured, **not** that the latest subtitle came from Gemini.
 
-- **Three-line lyrics:** Original text, pronunciation (romanization), and Turkish translation together, without replacing the original.
-- **Multilingual pronunciation:** Romanization for Korean, Japanese, Chinese, Thai, and other non-Latin scripts when available. v48 improves Thai and mixed-language lyric handling.
-- **No API key needed:** Google Translate works out of the box, with MyMemory as a fallback.
-- **Optional Gemini AI:** More natural Turkish translations using the song's context, tone, idioms, and slang.
-- **Smart cache:** Saves translated lines locally, skips lyrics detected as already Turkish, and filters certain broken results.
-- **Cleaner lyrics:** Removes distracting blur and automatically falls back to other translation services when needed.
+### Marketplace installation (repository maintainer)
 
-## Installation
+This ZIP contains `spicy-tr.js`, `manifest.json`, `marketplace-icon.png`, and `README.md`. Replace those four files **in your repository's main branch**, commit, then let Spicetify Marketplace detect the new manifest version **49.0.0**. Do not forget `manifest.json` (the public repo previously reported `46.0.0` even when the JS reported `48.0.0`).
 
-Requires **Spotify Desktop**, **Spicetify**, and **Spicy Lyrics**.
-
-### Marketplace (recommended)
-
-1. Open **Spicetify Marketplace** in Spotify and select **Extensions**.
-2. Search for **Spicy Lyrics AI Translator & Romaja**.
-3. Click **Install**, then open the full Spicy Lyrics view while playing a song.
-
-No additional setup is required.
+The repository's original installation instructions are otherwise unchanged. Do not enable both a manually installed extension and the Marketplace copy simultaneously; duplicate installations can lead to confusing behavior.
 
 ### Manual installation
 
-1. Download [`spicy-tr.js`](https://raw.githubusercontent.com/korelili/spicetify-spicy-lyrics-tr/main/spicy-tr.js).
-2. Move it to your Spicetify `Extensions` folder:
-   - **Windows:** `%appdata%\spicetify\Extensions`
-   - **macOS / Linux:** `~/.config/spicetify/Extensions`
-3. Run:
+Replace `spicy-tr.js` in your Spicetify extensions directory, then run `spicetify apply` and restart Spotify:
 
-   ```bash
-   spicetify config extensions spicy-tr.js
-   spicetify apply
-   ```
+- Windows: `%appdata%\spicetify\Extensions`
+- macOS/Linux: `~/.config/spicetify/Extensions`
 
-## How to use
+If not already enabled: `spicetify config extensions spicy-tr.js` followed by `spicetify apply`.
 
-First, turn **off** Spicy Lyrics' built-in **`A` (Romanization)** option to keep the original characters visible.
+### How to use
 
-- **Left-click `TR` / `AI`:** Show or hide the additional lyric lines.
-- **Right-click `TR` / `AI`:** Open Gemini API key settings.
-- **`TR`:** No Gemini key configured; uses the free translation services.
-- **`AI`:** Gemini key configured; fallback services remain available. An **`!`** indicates a temporary service warning.
+- Turn **OFF** Spicy Lyrics' own `A` romanization toggle, to keep the original characters on-screen.
+- Left-click the `TR` / `AI` control to show/hide overlays.
+- Right-click the `TR` / `AI` control for Gemini keys, strict quality mode and Save & Reset.
+- Your existing `spicy_tr_gemini_keys` API keys are preserved locally. **Never send them to bug reports or screenshots.**
+- With **no configured API key**, standard GTX / MyMemory fallback still displays Turkish translations, although their quality is not guaranteed.
+- With a configured key and **quality mode ON** (default), missing Turkish lines during an API outage are expected; the extension prefers no translation over a clearly wrong one. Disable strict quality mode in settings to display approximate machine translations again.
+- Existing bad Gemini translations are not guaranteed to be automatically corrected. After verifying V49 is running, a **single Save & Reset** can clear those old rows, but it consumes fresh API quota.
 
-### Add Gemini AI (optional)
+### Diagnostics
 
-1. Get a key from [Google AI Studio](https://aistudio.google.com/apikey).
-2. Right-click the `TR` button and paste your key. Multiple keys can be separated by commas or new lines.
-3. Click **Save & Reset** to apply the keys and translate again.
+1. Hover the extension button: verify `[SpicyTR V49]` or `[SpicyTR V49 · kalite modu açık]` in the tooltip.
+2. Watch whether the button shows `AI!` (a temporary service warning).
+3. For console diagnostics, in Spotify DevTools enter `localStorage.setItem('spicy_tr_debug','true')` and restart Spotify. Do **not** share full console messages containing secrets.
+4. If the tooltip still says `10sn içinde cevap gelmedi`, you are probably running an older build: V49 uses a 30-second Gemini timeout and does not emit that wording itself.
+5. Ensure the API key actually has access/quota for the selected model. Different API keys in the **same Google project** do not get independent quotas.
 
-> **Important:** **Save & Reset clears the entire local translation cache**, even if the keys haven't changed. Previously translated lyrics will need new requests, which may use API quota. API keys are stored locally; keep them private.
+### Test limitations
 
-## Troubleshooting
+V49 was checked with Node.js JavaScript syntax validation and simulated tests for cache migration, Gemini success, 400 schema recovery, 429 quotas, idiom fixes, overlay filtering and romanization persistence. It was **not tested live inside your Spotify account** or against your private Google Gemini API keys. Some lyrics still need human review and no machine translation system can promise perfect lines.
 
-- **Button missing?** Confirm both extensions are installed, open the full Spicy Lyrics view, and restart Spotify if needed.
-- **No pronunciation?** Disable Spicy Lyrics' built-in `A` option. Romanization depends on the source lyrics and available results.
-- **Outdated translations or Gemini issues?** Check your key and quota, then use **Save & Reset**. The extension can fall back to Google Translate or MyMemory.
-
-For bugs and suggestions, [open an issue](https://github.com/korelili/spicetify-spicy-lyrics-tr/issues).
-
----
+Report issues: <https://github.com/korelili/spicetify-spicy-lyrics-tr/issues>
 
 Made by [@korelili](https://github.com/korelili).
