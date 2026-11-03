@@ -2,14 +2,14 @@
 
 **Turkish translations and romanized pronunciation, right below the original lyrics.** A companion extension for [Spicy Lyrics](https://spicylyrics.org/) on Spotify Desktop.
 
-**Available on Spicetify Marketplace · v46.0.0**
+**Available on Spicetify Marketplace · v47.0.0**
 
 ![Extension preview](preview.png)
 
 ## Features
 
 - **Three-line lyrics:** Original text, pronunciation (romanization), and Turkish translation together, without replacing the original.
-- **Multilingual pronunciation:** Romanization for Korean, Japanese, Chinese, Thai, and other non-Latin scripts when available. v46 improves Thai and mixed-language lyric handling.
+- **Multilingual pronunciation:** Romanization for Korean, Japanese, Chinese, Thai, and other non-Latin scripts when available. v47 improves Thai and mixed-language lyric handling.
 - **No API key needed:** Google Translate works out of the box, with MyMemory as a fallback.
 - **Optional Gemini AI:** More natural Turkish translations using the song's context, tone, idioms, and slang.
 - **Smart cache:** Saves translated lines locally, skips lyrics detected as already Turkish, and filters certain broken results.
