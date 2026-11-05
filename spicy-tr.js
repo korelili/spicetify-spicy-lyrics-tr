@@ -1,16 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 52.0.0
-// V52: event capture and persistent runtime-owned toggle, safe cleanup after remounts;
+// VERSION: 53.0.0
+// V53: context-aware cache, stronger Korean/mixed-language lyric localization, quality-first Gemini routing;
 // V50+ Gemini request/cache protections retained.
 // Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV52() {
+(function spicyTurkishProV53() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V52]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V52]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V52]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V53]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V53]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V53]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -91,7 +91,7 @@
   // One shared request stream across ALL keys/models and songs. Avoid RPM spikes.
   const GEMINI_MIN_START_INTERVAL_MS = 9000;
   const TRACK_SETTLE_MS = 1050;
-  const CACHE_QUALITY_VERSION = 50;
+  const CACHE_QUALITY_VERSION = 51;
   let nextGeminiRequestAt = 0;
   let lastTrackSwitchAt = Date.now();
   let currentSongId = '';
@@ -111,6 +111,43 @@
     const item = Spicetify?.Player?.data?.item;
     return item?.uri || item?.id || (item?.name ? `${item.name}::${(item.artists || []).map(a => a.name).join(',')}` : '');
   }
+
+  // The old cache used only the raw lyric as its key. That reused translations
+  // across unrelated songs, even when the same words had a different subject,
+  // idiom or meaning. Keep the same localStorage key, but scope new entries to
+  // the Spotify track identity. Old romanization-only entries remain reusable.
+  const CACHE_KEY_SEPARATOR = '\u001f';
+  const rawCacheGet = Map.prototype.get.bind(cache);
+  const rawCacheSet = Map.prototype.set.bind(cache);
+  const rawCacheDelete = Map.prototype.delete.bind(cache);
+  const rawCacheEntries = Map.prototype.entries.bind(cache);
+  function activeCacheTrackId() {
+    return currentSongId || trackIdentity() || '__unknown_track__';
+  }
+  function scopedCacheKey(text, trackId = activeCacheTrackId()) {
+    return `${trackId}${CACHE_KEY_SEPARATOR}${String(text)}`;
+  }
+  cache.get = function (text) {
+    const scoped = rawCacheGet(scopedCacheKey(text));
+    if (scoped) return scoped;
+    const legacy = rawCacheGet(String(text));
+    // Preserve romanization from the old cache, but never display an old
+    // context-free translation. Curated glossary entries are context-neutral.
+    if (legacy && !legacy.tr && legacy.romaja) return legacy;
+    if (legacy && legacy.source === 'glossary' && legacy.qualityVersion === CACHE_QUALITY_VERSION) return legacy;
+    return undefined;
+  };
+  cache.set = function (text, value) {
+    const trackId = activeCacheTrackId();
+    return rawCacheSet(scopedCacheKey(text, trackId), { ...(value || {}), songId: trackId });
+  };
+  cache.has = function (text) { return this.get(text) !== undefined; };
+  cache.delete = function (text) {
+    const scopedDeleted = rawCacheDelete(scopedCacheKey(text));
+    const legacyDeleted = rawCacheDelete(String(text));
+    return scopedDeleted || legacyDeleted;
+  };
+
   function invalidateTrackWork() {
     abortOngoingWork();
     inFlight.clear();
@@ -120,7 +157,7 @@
     lastTrackSwitchAt = Date.now();
     stats.trackSwitches++;
   }
-  window.__spicyTRDiagnostics = () => ({ version: '52.0.0', enabled: isEnabled, ...stats,
+  window.__spicyTRDiagnostics = () => ({ version: '53.0.0', enabled: isEnabled, ...stats,
     currentSong: currentSongId, cacheLines: cache.size,
     inFlightLines: inFlight.size, queueRunning,
     availableModels: GEMINI_MODELS.filter(m => geminiApiKeys.some(k => isGeminiComboReady(k, m))),
@@ -199,12 +236,13 @@
   }
   loadBackoffState();
 
-  // Current stable Gemini text models; prefer efficient Flash-Lite for lyrics.
+  // Quality-first order: use the strongest current Flash model first; keep Lite models as fallbacks.
+  // This does not add requests or change the shared 9-second request pacing.
   const GEMINI_MODELS = [
-    'gemini-3.5-flash-lite',
-    'gemini-3.1-flash-lite',
+    'gemini-3.8-flash',
     'gemini-3.6-flash',
-    'gemini-3.8-flash'
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite'
   ];
 
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
@@ -295,7 +333,7 @@
       const entries = Array.from(cache.entries()).map(([k, v]) => {
         if (!v || (!v.tr && !v.romaja)) return null;
         if (geminiApiKeys.length && !['gemini', 'glossary'].includes(v.source)) {
-          return v.romaja ? [k, { romaja: v.romaja, tr: '', source: 'romanization' }] : null;
+          return v.romaja ? [k, { ...v, tr: '', source: 'romanization' }] : null;
         }
         return [k, v];
       }).filter(Boolean).slice(-6000);
@@ -331,41 +369,53 @@
 
   function repairCache() {
     let fixed = 0, purged = 0, reformalFixed = 0, turkishPurged = 0, gluedPurged = 0;
-    for (const [rawLine, data] of Array.from(cache.entries())) {
+    for (const [cacheKey, data] of Array.from(rawCacheEntries())) {
       if (!data) continue;
-      // V49 could mark a nonsensical result as trusted Gemini. Purge old
-      // translations ONCE, while retaining already-fetched romanization.
+      const separatorAt = cacheKey.indexOf(CACHE_KEY_SEPARATOR);
+      const isTrackScoped = separatorAt >= 0;
+      const rawLine = isTrackScoped ? cacheKey.slice(separatorAt + 1) : cacheKey;
+
+      // V52 and earlier stored translations by lyric text alone. They cannot
+      // safely be reused in another song; retain only their romanization.
+      if (!isTrackScoped && data.tr && data.source !== 'glossary') {
+        data.tr = '';
+        data.source = 'romanization';
+        data.nextGeminiAt = 0;
+        data.qualityVersion = CACHE_QUALITY_VERSION;
+        rawCacheSet(cacheKey, data);
+        stats.stalePurged++;
+        reformalFixed++;
+      }
+
+      // Re-translate old Gemini entries after the localization prompt/model change.
       if (data.tr && data.source === 'gemini' && data.qualityVersion !== CACHE_QUALITY_VERSION) {
         data.tr = '';
         data.source = 'romanization';
         data.nextGeminiAt = 0;
-        cache.set(rawLine, data);
+        rawCacheSet(cacheKey, data);
         stats.stalePurged++;
         reformalFixed++;
       }
       if (data.tr && !data.source) {
         data.source = 'legacy';
         data.nextGeminiAt = 0;
-        cache.set(rawLine, data);
+        rawCacheSet(cacheKey, data);
         reformalFixed++;
       }
 
       if (looksTurkish(rawLine)) {
-        cache.delete(rawLine);
+        rawCacheDelete(cacheKey);
         turkishPurged++;
         continue;
       }
 
-      // (V44) Obviously glued-together output from an earlier bad
-      // GTX/MyMemory response - purge so the line gets a real retry.
       if (data.tr && looksGluedTranslation(rawLine, data.tr)) {
-        cache.delete(rawLine);
+        rawCacheDelete(cacheKey);
         gluedPurged++;
         continue;
       }
 
       let changed = false;
-
       if (data.romaja && !/\s/.test(data.romaja) && data.romaja.length >= 8) {
         const repaired = splitRepeatingUnit(data.romaja);
         if (repaired) {
@@ -379,7 +429,7 @@
       }
 
       if (isAdlibPattern(rawLine) && data.tr && data.tr.includes('&') && normalize(data.tr) !== normalize(rawLine)) {
-        cache.delete(rawLine);
+        rawCacheDelete(cacheKey);
         purged++;
         continue;
       }
@@ -393,14 +443,12 @@
         }
       }
 
-      if (changed) cache.set(rawLine, data);
+      if (changed) rawCacheSet(cacheKey, data);
     }
-    // (V44) FIX: this used to reference an undefined `reformalized`
-    // variable instead of `reformalFixed`, which threw and skipped
-    // saveCache() below on any run where only rule-3 fixes happened.
+
     if (fixed || purged || reformalFixed || turkishPurged || gluedPurged) {
       saveCache();
-      log(`Cache onarımı: ${fixed} satırın romanizasyonu düzeltildi, ${purged} hatalı ad-lib çevirisi silindi, ${reformalFixed} satırda resmi/"siz" kalıntısı temizlendi, ${turkishPurged} zaten-Türkçe satırın gereksiz çevirisi silindi, ${gluedPurged} bitişik/hatalı çeviri silindi.`);
+      log(`Cache onarımı: ${fixed} romanizasyon düzeltildi, ${purged} ad-lib çevirisi silindi, ${reformalFixed} eski/bağlam dışı çeviri yenileme için temizlendi, ${turkishPurged} zaten-Türkçe satır silindi, ${gluedPurged} bozuk çeviri silindi.`);
     }
   }
   try {
@@ -757,36 +805,41 @@ function isNonLatin(text) {
     const contextLinesText = allSongLines.slice(Math.max(0, firstIndex - 5), endIndex + 6)
       .map(l => `- ${l}`).join('\n').slice(0, 3500);
     const targetLinesText = chunkLines.map((l, i) => `${i + 1}. ${l}`).join('\n');
-    const prompt = `You are a professional English/Korean/Japanese/Chinese/Thai to Turkish song lyric localizer.
+    const prompt = `You are an expert multilingual song-lyric localizer translating into natural Turkish.
 Song: ${songTitle} — ${artist}
 
-Surrounding lyrics (context only; do not translate these as extra lines):
+Surrounding lyrics (context only; do not return translations for these lines):
 ${contextLinesText}
 
-Translate EXACTLY these ${chunkLines.length} numbered lines, preserving their order:
+Translate EXACTLY these ${chunkLines.length} numbered target lines, in the same order:
 ${targetLinesText}
 
-Translate the meaning, not individual dictionary words. Write natural, colloquial, idiomatic,
-flowing Turkish as in a professionally localized song. Address the listener using informal "sen",
-never formal "siz". Infer the speaker, addressee, tense, implied verbs and line fragments from
-context. Preserve metaphors, sexual implications, humor, slang and intensity without sanitizing.
-Avoid stiff literalism and nonsensical sound-alikes. For example:
-"Talk to me" means "Benimle konuş", NEVER "Konuşma cihazı".
-"Tell me what's on your mind" means "Aklından geçenleri söyle bana".
-"You say you want a good time" means "Güzel vakit geçirmek istediğini söylüyorsun".
-"That's what I like" means "Benim sevdiğim şey de bu" (not an awkward dictionary phrase).
-"Silk sheets and diamonds, all white" means both sheets and diamonds are white; keep the imagery.
-If a line is grammatically incomplete, translate it naturally as part of its context.
-Don't insert new details or reverse the meaning. Never replace explicit speech with euphemisms.
-For Hangul/Kanji/Hiragana/Katakana/Thai/Cyrillic etc, also supply readable, space-separated
-Latin romanization in "rom". For Latin-script lines, "rom" must be "".
-Only return a JSON array of EXACTLY ${chunkLines.length} objects; each {"tr":"...","rom":"..."},
-in the same order. No markdown, explanations or extra objects.`;
+CORE LOCALIZATION RULES
+- Translate meaning and intent, never word-by-word dictionary fragments. Produce fluent, natural Turkish that sounds like real lyrics.
+- Use informal second person (sen); never use formal "siz" unless the source clearly addresses a group.
+- Read the target lines together as one stanza. Use surrounding lines to resolve omitted subjects/objects, pronouns, tense, idioms and incomplete phrases.
+- A lyric line may continue into the next line. Keep its Turkish fragment natural; do not invent a sentence break or force a complete sentence where the source continues.
+- Preserve repetitions, echoes, parentheses, ad-libs and the emotional intensity of the original.
+- For mixed Korean/English lines, translate the Korean meaning while keeping English names, titles and deliberate hooks in English when they function as a name or refrain. Do not mechanically turn a repeated hook into an awkward Turkish verb.
+- Korean vocal interjections such as 오 / 아 / 와 may mean "Oh", "Ah" or "Vay" in a lyric. Do not automatically render 오 as the Turkish pronoun "o".
+- Translate idioms by their intended meaning. For example, 난 숨 못 참겠어 in a romantic/excited context means "Kendimi tutamıyorum", not "Nefesimi tutamıyorum".
+- Preserve metaphors, slang, humor, flirtation and explicit meaning. Do not sanitize, add details, reverse the meaning, or invent causes, actions or emotions.
+- Keep English words that are clearly song titles, artist names or signature hooks unchanged. Translate ordinary English sentences normally.
+- Check every result against the source for subject, negation, tense, number and emotional meaning before returning it.
+
+Examples of natural localization:
+"Talk to me" -> "Benimle konuş" (never "Konuşma cihazı").
+"Tell me what's on your mind" -> "Aklından geçenleri söyle bana".
+"You say you want a good time" -> "Güzel vakit geçirmek istediğini söylüyorsun".
+"That's what I like" -> "Benim sevdiğim şey de bu".
+
+For Hangul, Kanji, Hiragana, Katakana, Thai, Cyrillic and other non-Latin scripts, also provide readable, space-separated Latin romanization in "rom". For Latin-script lines, "rom" must be an empty string.
+Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"...","rom":"..."}, in the same order. No markdown, commentary or extra objects.`;
 
     let lastError = new Error('Gemini kombinasyonları şu an kullanılamıyor');
     const keyCount = geminiApiKeys.length;
     if (keyCount === 0) throw lastError;
-    // Rotate starting key between batches. Model order is cost-conscious.
+    // Rotate starting key between batches; model order prioritizes translation quality.
     const startKey = geminiKeyCursor++ % keyCount;
     const batchStarted = Date.now();
     let attempted = 0;
@@ -1323,7 +1376,7 @@ in the same order. No markdown, explanations or extra objects.`;
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && anyWarn ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
     if (!isEnabled) {
-      btn.title = 'SpicyTR V52 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
+      btn.title = 'SpicyTR V53 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
       return;
     }
 
@@ -1345,10 +1398,10 @@ in the same order. No markdown, explanations or extra objects.`;
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V52 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
+        ? `SpicyTR V53 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
-    btn.title = `[SpicyTR V52${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
+    btn.title = `[SpicyTR V53${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
   }
 
   // The Spicy Lyrics controls are React-managed. A button-local onclick is
@@ -1361,7 +1414,7 @@ in the same order. No markdown, explanations or extra objects.`;
     if (disposed || !ownedToggleButton) return;
     const target = event.target;
     // An obsolete V47/V49 button may have appeared during an old observer
-    // callback. Route those clicks into V52 state rather than old onclick.
+    // callback. Route those clicks into V53 state rather than old onclick.
     const clickedButton = target instanceof Element && target.closest('#spicy-tr-toggle-btn');
     if (!clickedButton || !clickedButton.closest('#SpicyLyricsPage .ViewControls')) return;
     event.preventDefault();

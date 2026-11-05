@@ -1,10 +1,10 @@
 [
   {
     "name": "Spicy Lyrics AI Translator & Romaja",
-    "version": "52.0.0",
+    "version": "53.0.0",
     "readme": "README.md",
-    "description": "Understand the words. Stay in the music. Turkish translations, romanized pronunciations, and optional Gemini AI for Spicy Lyrics.",
-    "preview": "preview.png",
+    "description": "Natural Turkish lyric translations and romanized pronunciation for Spicy Lyrics, with optional Gemini AI.",
+    "preview": "marketplace-icon.png",
     "main": "spicy-tr.js",
     "authors": [
       {
