@@ -1,16 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 55.0.0
-// V55: romanize Korean songwriter names in Spicy Lyrics credits without Gemini/API usage;
-// Preserve V52 runtime toggle, API keys, cache identity, and contextual Gemini localization.
+// VERSION: 55.1.0
+// V55.1: explicit lyric localization, per-key quota cooldowns, cancellable queue, scoped observer, and Korean credit romanization;
+// Preserve saved API keys, cache identity, toggle behavior, and existing Spicy Lyrics UI.
 // Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV55() {
+(function spicyTurkishProV551() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V55]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V55]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V55]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V55.1]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V55.1]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V55.1]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -59,6 +59,16 @@
   ].forEach(k => localStorage.removeItem(k));
 
   const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v35';
+
+  // Lines with profanity, sexual slang, or high-context idioms must not be
+  // displayed from context-free machine fallbacks when Gemini keys exist.
+  // They remain queued for contextual Gemini localization instead.
+  const CONTEXTUAL_QUALITY_VERSION = 1;
+  const CONTEXTUAL_RISK_PATTERN = /\b(?:fuck(?:s|ed|er|ers|ing|in)?|shit(?:s|ty)?|bitch(?:es|y)?|pussy|pussies|dick(?:s)?|cock(?:s)?|cum(?:ming)?|asshole|ass(?:es)?|whore(?:s)?|hoes?|ho|thots?|sluts?|tits?|boobs?|clit)\b'?|\b(?:hangover|pouring\s+for\s+two|get\s+that\s+paper|save\s+that\s+.{0,30}\s+for\s+later|wrap(?:ping)?\s+['’]?round|wrap(?:ping)?\s+around|ride\s+for\s+you)\b/i;
+  function requiresGeminiQuality(text) {
+    return CONTEXTUAL_RISK_PATTERN.test(String(text || ''));
+  }
+
   let savedCache = {};
   try {
     savedCache = JSON.parse(localStorage.getItem(STORAGE_CACHE_KEY) || '{}');
@@ -78,11 +88,12 @@
   const MODEL_DEAD_QUOTA_MAX_MS = 24 * 60 * 60 * 1000;
   const MODEL_CONFIG_COOLDOWN_MS = 10 * 60 * 1000;
   const GEMINI_TIMEOUT_MS = 9000;
-  const GEMINI_ATTEMPTS_PER_BATCH = 3; // Small retry budget; fallback translation runs in parallel.
+  const GEMINI_ATTEMPTS_PER_BATCH = 4; // Bounded failover; a 429 on one key no longer blocks the next key.
   const GEMINI_BATCH_TIME_BUDGET_MS = 14000;
   const FALLBACK_UPGRADE_INTERVAL_MS = 2 * 60 * 1000;
-  const modelCooldowns = new Map(); // 400 after safe retry: affects model/config, not each key.
-  const keyCooldowns = new Map();   // 401/403: affects key, not all models.
+  const modelCooldowns = new Map(); // Service/config failures that affect the model across keys.
+  const comboCooldowns = new Map(); // 429/timeouts scoped to one API-key + model combination.
+  const keyCooldowns = new Map();   // Invalid-key failures affect only that key.
   const simpleModels = new Set();   // Models that need a simpler response config.
   let geminiKeyCursor = 0;
   const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // kept for state compatibility
@@ -90,7 +101,7 @@
   let geminiBackoffStage = 0;
   // One shared serial request stream. No artificial 9-second wait; real 429 Retry-After is respected.
   const GEMINI_MIN_START_INTERVAL_MS = 1500;
-  const TRACK_SETTLE_MS = 350;
+  const TRACK_SETTLE_MS = 650;
   const CACHE_QUALITY_VERSION = 51; // Keep existing good Gemini cache entries.
   let nextGeminiRequestAt = 0;
   let lastTrackSwitchAt = Date.now();
@@ -139,7 +150,11 @@
   };
   cache.set = function (text, value) {
     const trackId = activeCacheTrackId();
-    return rawCacheSet(scopedCacheKey(text, trackId), { ...(value || {}), songId: trackId });
+    const nextValue = { ...(value || {}), songId: trackId };
+    if (requiresGeminiQuality(text)) {
+      nextValue.contextualQualityVersion = CONTEXTUAL_QUALITY_VERSION;
+    }
+    return rawCacheSet(scopedCacheKey(text, trackId), nextValue);
   };
   cache.has = function (text) { return this.get(text) !== undefined; };
   cache.delete = function (text) {
@@ -150,6 +165,9 @@
 
   function invalidateTrackWork() {
     abortOngoingWork();
+    // Release the logical queue immediately. Old async work is fenced by its
+    // generation ID and must not block or clean up the new song's queue.
+    queueRunning = false;
     inFlight.clear();
     needsRomajaRefetch.clear();
     clearTimeout(batchTimer);
@@ -157,12 +175,13 @@
     lastTrackSwitchAt = Date.now();
     stats.trackSwitches++;
   }
-  window.__spicyTRDiagnostics = () => ({ version: '55.0.0', enabled: isEnabled, ...stats,
+  window.__spicyTRDiagnostics = () => ({ version: '55.1.0', enabled: isEnabled, ...stats,
     currentSong: currentSongId, cacheLines: cache.size,
     inFlightLines: inFlight.size, queueRunning,
     availableModels: GEMINI_MODELS.filter(m => geminiApiKeys.some(k => isGeminiComboReady(k, m))),
     nextRequestInSec: Math.max(0, Math.ceil((nextGeminiRequestAt - Date.now()) / 1000)),
     fallbackEnabled: !qualityMode, geminiMinStartIntervalMs: GEMINI_MIN_START_INTERVAL_MS,
+    contextualGeminiOnlyLines: true, perKeyModelCooldowns: comboCooldowns.size,
     maxLinesPerGeminiCall: MAX_LINES_PER_GEMINI_CALL, geminiTimeoutMs: GEMINI_TIMEOUT_MS,
     nextAvailableInSec: Math.max(0, Math.ceil((nextGeminiAvailableAt() - Date.now()) / 1000)),
     lastError: geminiLastError
@@ -184,11 +203,12 @@
   function saveBackoffState() {
     try {
       const state = {
-        geminiGloballyDownUntil, geminiBackoffStage,
+        cooldownSchema: 2,
         gtxGloballyDownUntil, gtxBackoffStage,
         mmGloballyDownUntil, mmBackoffStage,
         deadModels: Array.from(deadModels.entries()),
         modelCooldowns: Array.from(modelCooldowns.entries()),
+        comboCooldowns: Array.from(comboCooldowns.entries()),
         keyCooldowns: Array.from(keyCooldowns.entries()),
         simpleModels: Array.from(simpleModels)
       };
@@ -201,10 +221,6 @@
       if (!raw) return;
       const state = JSON.parse(raw);
       const now = Date.now();
-      if (state.geminiGloballyDownUntil > now) {
-        geminiGloballyDownUntil = state.geminiGloballyDownUntil;
-        geminiBackoffStage = state.geminiBackoffStage || 0;
-      }
       if (state.gtxGloballyDownUntil > now) {
         gtxGloballyDownUntil = state.gtxGloballyDownUntil;
         gtxBackoffStage = state.gtxBackoffStage || 0;
@@ -218,28 +234,41 @@
           if (Number.isFinite(until) && until > now) deadModels.set(k, until);
         });
       }
-      if (Array.isArray(state.modelCooldowns)) {
-        state.modelCooldowns.forEach(([k, until]) => {
-          if (Number.isFinite(until) && until > now) modelCooldowns.set(k, until);
-        });
-      }
       if (Array.isArray(state.keyCooldowns)) {
         state.keyCooldowns.forEach(([k, until]) => {
           if (Number.isFinite(until) && until > now) keyCooldowns.set(k, until);
         });
       }
+      // V54 stored 429 quota cooldowns in modelCooldowns, which blocked every
+      // configured key when only one key/project had reached its quota.
+      // Load model/combo cooldowns only from the new, correctly scoped schema.
+      if (state.cooldownSchema === 2) {
+        if (Array.isArray(state.modelCooldowns)) {
+          state.modelCooldowns.forEach(([k, until]) => {
+            if (Number.isFinite(until) && until > now) modelCooldowns.set(k, until);
+          });
+        }
+        if (Array.isArray(state.comboCooldowns)) {
+          state.comboCooldowns.forEach(([k, until]) => {
+            if (Number.isFinite(until) && until > now) comboCooldowns.set(k, until);
+          });
+        }
+      } else {
+        log('Eski V54 model-geneli Gemini bekleme kayıtları atlandı; 429 beklemeleri artık anahtar/model bazında tutuluyor.');
+      }
       if (Array.isArray(state.simpleModels)) {
         state.simpleModels.filter(x => typeof x === 'string').forEach(x => simpleModels.add(x));
       }
-      if (geminiGloballyDownUntil > now || gtxGloballyDownUntil > now || mmGloballyDownUntil > now || deadModels.size > 0) {
-        log('Önceki oturumdan hâlâ geçerli olan bekleme süreleri geri yüklendi (gerçek limitler tekrar tetiklenmesin diye).');
+      if (gtxGloballyDownUntil > now || mmGloballyDownUntil > now ||
+          deadModels.size > 0 || comboCooldowns.size > 0 || modelCooldowns.size > 0) {
+        log('Geçerli servis ve anahtar/model bekleme süreleri geri yüklendi.');
       }
     } catch (e) {}
   }
   loadBackoffState();
 
   // Quality-first order: use the strongest current Flash model first; keep Lite models as fallbacks.
-  // This does not add requests or change the shared 9-second request pacing.
+  // This does not add requests; the shared Gemini start interval remains 1.5 seconds.
   const GEMINI_MODELS = [
     'gemini-3.8-flash',
     'gemini-3.6-flash',
@@ -296,7 +325,9 @@
     deadModels.delete(oldId);
   }
   function isGeminiComboReady(key, model, now = Date.now()) {
-    return (deadModels.get(comboId(key, model)) || 0) <= now &&
+    const id = comboId(key, model);
+    return (deadModels.get(id) || 0) <= now &&
+      (comboCooldowns.get(id) || 0) <= now &&
       (keyCooldowns.get(keyId(key)) || 0) <= now &&
       (modelCooldowns.get(model) || 0) <= now;
   }
@@ -305,8 +336,10 @@
     const now = Date.now();
     let earliest = Infinity;
     for (const model of GEMINI_MODELS) for (const key of geminiApiKeys) {
-      const next = Math.max(deadModels.get(comboId(key, model)) || 0,
-        keyCooldowns.get(keyId(key)) || 0, modelCooldowns.get(model) || 0);
+      const id = comboId(key, model);
+      const next = Math.max(deadModels.get(id) || 0,
+        comboCooldowns.get(id) || 0, keyCooldowns.get(keyId(key)) || 0,
+        modelCooldowns.get(model) || 0);
       if (next <= now) return now;
       earliest = Math.min(earliest, next);
     }
@@ -383,6 +416,18 @@
         data.source = 'romanization';
         data.nextGeminiAt = 0;
         data.qualityVersion = CACHE_QUALITY_VERSION;
+        rawCacheSet(cacheKey, data);
+        stats.stalePurged++;
+        reformalFixed++;
+      }
+
+      // Re-translate high-risk slang/idiom lines once with the explicit-localization
+      // prompt. Keep romanization and every unrelated cached translation intact.
+      if (requiresGeminiQuality(rawLine) && data.contextualQualityVersion !== CONTEXTUAL_QUALITY_VERSION) {
+        data.tr = '';
+        data.source = 'romanization';
+        data.nextGeminiAt = 0;
+        data.contextualQualityVersion = CONTEXTUAL_QUALITY_VERSION;
         rawCacheSet(cacheKey, data);
         stats.stalePurged++;
         reformalFixed++;
@@ -866,7 +911,9 @@ function isNonLatin(text) {
     }
 
     const isTrusted = data.source === 'gemini' || data.source === 'glossary';
-    const showTr = !qualityMode || geminiApiKeys.length === 0 || isTrusted;
+    const needsContextualAI = geminiApiKeys.length > 0 && requiresGeminiQuality(rawText);
+    const showTr = (!qualityMode || geminiApiKeys.length === 0 || isTrusted) &&
+      (!needsContextualAI || isTrusted);
     if (showTr && data.tr && data.tr.toLowerCase() !== rawText.toLowerCase()) {
       const trEl = document.createElement('div');
       trEl.className = 'spicy-tr-turkish';
@@ -982,15 +1029,22 @@ CORE LOCALIZATION RULES
 - For mixed Korean/English lines, translate the Korean meaning while keeping English names, titles and deliberate hooks in English when they function as a name or refrain. Do not mechanically turn a repeated hook into an awkward Turkish verb.
 - Korean vocal interjections such as 오 / 아 / 와 may mean "Oh", "Ah" or "Vay" in a lyric. Do not automatically render 오 as the Turkish pronoun "o".
 - Translate idioms by their intended meaning. For example, 난 숨 못 참겠어 in a romantic/excited context means "Kendimi tutamıyorum", not "Nefesimi tutamıyorum".
-- Preserve metaphors, slang, humor, flirtation and explicit meaning. Do not sanitize, add details, reverse the meaning, or invent causes, actions or emotions.
+- Preserve metaphors, slang, humor, flirtation and explicit meaning. Do not sanitize, censor, soften, add details, reverse the meaning, or invent causes, actions or emotions.
+- Match the source's register: if the singer uses a crude sexual word or profanity, use a comparably direct, natural Turkish equivalent. Do not replace it with vague words such as "ora", "orası", "özel bölge", "şey", "kadın" or "bir şey".
+- In an explicitly sexual/vulgar context, "pussy" should remain an explicit Turkish term such as "am" or "amcık"; use "vajina" only for a neutral/clinical context. "Dick/cock" should remain "sik" in a crude lyric, not be softened to a vague euphemism.
+- Translate "fuck/fucking/fuckin'" by its role in the sentence: a sexual verb may require "sikişmek"; an intensifier may be "fena halde" or another natural intensifier. Never mechanically turn "fuckin'" into "lanet olasıcasına".
+- Translate "bitch/hoe/whore" as the insult/slang intended in context (for example "sürtük" or "orospu"), not as neutral "kadın". Translate "shit" with its intended force ("bok", "siktir", "lanet olsun", etc.), not a generic filler.
 - Keep English words that are clearly song titles, artist names or signature hooks unchanged. Translate ordinary English sentences normally.
-- Check every result against the source for subject, negation, tense, number and emotional meaning before returning it.
+- Check every result against the source for subject, negation, tense, number, explicitness and emotional meaning before returning it.
 
 Examples of natural localization:
 "Talk to me" -> "Benimle konuş" (never "Konuşma cihazı").
 "Tell me what's on your mind" -> "Aklından geçenleri söyle bana".
 "You say you want a good time" -> "Güzel vakit geçirmek istediğini söylüyorsun".
 "That's what I like" -> "Benim sevdiğim şey de bu".
+"pussy" in a crude sexual lyric -> "amcık" (not "ora").
+"fucked her right there on the table" -> "onu tam orada masanın üstünde siktim" (keep the explicit action).
+"always fuckin' miss you" -> "seni deli gibi özlüyorum" (treat "fuckin'" as an intensifier here, not a literal curse).
 
 For Hangul, Kanji, Hiragana, Katakana, Thai, Cyrillic and other non-Latin scripts, also provide readable, space-separated Latin romanization in "rom". For Latin-script lines, "rom" must be an empty string.
 Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"...","rom":"..."}, in the same order. No markdown, commentary or extra objects.`;
@@ -1063,6 +1117,10 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
           if (!response.ok) {
             const status = response.status;
             geminiLastError = `${model} (anahtar ${j + 1}): HTTP ${status} ${bodyMsg}`;
+            if (status === 401 ||
+                /(?:standard.*api key|unrestricted.*standard|standard.*deprecated|auth key required|migrate.*auth key)/i.test(bodyMsg)) {
+              geminiLastError += ' — AI Studio > API Keys bölümünde anahtar türünü kontrol et; eski Standard anahtarlar için Gemini Auth key gerekebilir.';
+            }
             const now = Date.now();
             if (status === 429) {
               stats.http429++;
@@ -1070,8 +1128,8 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
               const daily = /(?:per day|daily|requests per day|RPD|per_day)/i.test(bodyMsg);
               const wait = Math.min(daily ? Math.max(retryMs || 0, untilPacificDailyResetMs(now)) :
                 (retryMs || MODEL_DEAD_QUOTA_DEFAULT_MS), MODEL_DEAD_QUOTA_MAX_MS);
-              modelCooldowns.set(model, now + Math.max(1000, wait));
-              warn(`${model}: 429, ${formatDuration(wait)} bekleme; aynı model diğer anahtarlarla tekrar denenmeyecek.`);
+              comboCooldowns.set(id, now + Math.max(1000, wait));
+              warn(`${model}: bu API anahtarı/model kombinasyonu 429 döndürdü; ${formatDuration(wait)} bekleyecek, diğer anahtarlar ayrı ayrı denenebilir.`);
             } else if (status === 503 || status === 500 || status === 502 || status === 504) {
               // The *model service* is busy: switching API keys wastes quota.
               if (status === 503) stats.http503++;
@@ -1126,7 +1184,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
             }
             const usableTr = !!cleanTr && isUsableTranslation(rawLine, cleanTr);
             // Keep romanization even if Gemini omitted/failed the Turkish field.
-            // The queue will fill the missing Turkish text with GTX/MyMemory.
+            // Ordinary missing lines may use GTX/MyMemory; contextual-risk lines stay Gemini-only when keys exist.
             if (usableTr || cleanRom) {
               cache.set(rawLine, {
                 tr: usableTr ? cleanTr : (existing.tr || ''),
@@ -1141,6 +1199,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
           geminiLastError = '';
           stats.geminiSuccess++;
           modelCooldowns.delete(model);
+          comboCooldowns.delete(id);
           deadModels.delete(id);
           saveBackoffState();
           saveCache();
@@ -1153,7 +1212,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
           if (isGeminiComboReady(apiKey, model)) {
             // A timeout / malformed response is not solved by hammering the
             // same model with four keys in the next seconds.
-            modelCooldowns.set(model, Date.now() + (e?.name === 'AbortError' ? 120000 : 60000));
+            comboCooldowns.set(id, Date.now() + (e?.name === 'AbortError' ? 120000 : 60000));
             saveBackoffState();
           }
         }
@@ -1166,35 +1225,25 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     throw lastError;
   }
 
-  const SLANG_NORMALIZE = [
-    [/\bhoes\b/gi, 'women'],
-    [/\bhoe\b/gi, 'woman'],
-    [/\bho\b/gi, 'woman'],
-    [/\bthots?\b/gi, 'women']
-  ];
-  function normalizeForDumbEngines(text) {
-    let t = text;
-    SLANG_NORMALIZE.forEach(([re, repl]) => { t = t.replace(re, repl); });
-    return t;
-  }
-
   function makeConcurrencyGate(limit, spacingMs) {
     let active = 0;
-    const waiters = [];
+    let nextStartAt = 0;
     return {
-      acquire() {
-        return new Promise(resolve => {
-          const tryAcquire = () => {
-            if (active < limit) { active++; resolve(); }
-            else { waiters.push(tryAcquire); }
-          };
-          tryAcquire();
-        });
+      async acquire(epoch) {
+        while (!disposed && epoch === generationId && isEnabled) {
+          const now = Date.now();
+          if (active < limit && now >= nextStartAt) {
+            active++;
+            nextStartAt = now + spacingMs;
+            return true;
+          }
+          const waitForSpacing = Math.max(10, nextStartAt - now);
+          await sleep(Math.min(50, waitForSpacing));
+        }
+        return false;
       },
       release() {
-        active--;
-        const next = waiters.shift();
-        if (next) setTimeout(next, spacingMs);
+        active = Math.max(0, active - 1);
       }
     };
   }
@@ -1214,6 +1263,9 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
 
   async function translateWithGTXPerLine(linesToTranslate, epoch) {
     if (epoch !== generationId || !isEnabled) return;
+    linesToTranslate = linesToTranslate.filter(line =>
+      !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
+    if (!linesToTranslate.length) return;
     if (Date.now() < gtxGloballyDownUntil) {
       const remaining = Math.min(gtxGloballyDownUntil - Date.now(), 60000);
       linesToTranslate.forEach(t => markFailed(t, remaining));
@@ -1230,11 +1282,11 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       }
 
       await Promise.all(chunks[ci].map(async (rawText) => {
-        await gtxGate.acquire();
+        if (!await gtxGate.acquire(epoch)) return;
         try {
           if (disposed || epoch !== generationId || !isEnabled) return;
           const adlib = isAdlibPattern(rawText);
-          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(normalizeForDumbEngines(rawText))}`;
+          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&dt=rm&q=${encodeURIComponent(rawText)}`;
           const res = await fetchWithTimeout(url, {}, 7000);
           if (!res.ok) {
             gtxLastError = `HTTP ${res.status}`;
@@ -1315,7 +1367,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
         const existing = cache.get(rawText);
         if (!existing || existing.romaja) return;
 
-        await gtxGate.acquire();
+        if (!await gtxGate.acquire(epoch)) return;
         try {
           if (disposed || epoch !== generationId || !isEnabled) return;
           const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=rm&q=${encodeURIComponent(rawText)}`;
@@ -1347,6 +1399,9 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
 
   async function translateWithMyMemoryPerLine(linesToTranslate, epoch) {
     if (epoch !== generationId || !isEnabled) return;
+    linesToTranslate = linesToTranslate.filter(line =>
+      !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
+    if (!linesToTranslate.length) return;
     if (Date.now() < mmGloballyDownUntil) {
       const remaining = Math.min(mmGloballyDownUntil - Date.now(), 60000);
       linesToTranslate.forEach(t => markFailed(t, remaining));
@@ -1372,10 +1427,10 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
           return;
         }
 
-        await mmGate.acquire();
+        if (!await mmGate.acquire(epoch)) return;
         try {
           if (disposed || epoch !== generationId || !isEnabled) return;
-          const q = normalizeForDumbEngines(rawText).slice(0, 480);
+          const q = String(rawText || '').slice(0, 480);
           const srcLang = detectSourceLangForMyMemory(rawText);
           const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${srcLang}|tr`;
           const res = await fetchWithTimeout(url, {}, 10000);
@@ -1522,13 +1577,17 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
         }
         if (disposed || epoch !== generationId || !isEnabled) return;
 
-        const fallbackCandidates = missing.filter(line => !cache.get(line)?.tr);
+        const fallbackCandidates = missing.filter(line =>
+          !cache.get(line)?.tr &&
+          !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
         if (fallbackCandidates.length && Date.now() >= gtxGloballyDownUntil) {
           await translateWithGTXPerLine(fallbackCandidates, epoch);
         }
         if (disposed || epoch !== generationId || !isEnabled) return;
 
-        const stillMissing = missing.filter(line => !cache.get(line)?.tr);
+        const stillMissing = missing.filter(line =>
+          !cache.get(line)?.tr &&
+          !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
         if (stillMissing.length && Date.now() >= mmGloballyDownUntil) {
           await translateWithMyMemoryPerLine(stillMissing, epoch);
         }
@@ -1569,9 +1628,11 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     } catch (e) {
       if (epoch === generationId) err('processQueue beklenmedik hata:', e);
     } finally {
-      for (const t of allVisibleLines) inFlight.delete(t);
-      queueRunning = false;
-      scheduleScan();
+      if (epoch === generationId) {
+        for (const t of allVisibleLines) inFlight.delete(t);
+        queueRunning = false;
+        scheduleScan();
+      }
     }
   }
 
@@ -1592,7 +1653,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && anyWarn ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
     if (!isEnabled) {
-      btn.title = 'SpicyTR V55 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
+      btn.title = 'SpicyTR V55.1 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
       return;
     }
 
@@ -1614,10 +1675,10 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V55 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
+        ? `SpicyTR V55.1 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
-    btn.title = `[SpicyTR V55${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
+    btn.title = `[SpicyTR V55.1${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
   }
 
   // The Spicy Lyrics controls are React-managed. A button-local onclick is
@@ -1625,12 +1686,12 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
   // click. Use one delegated, capture-phase handler for our owned button.
   // It survives React replacing the toolbar and blocks ancestor click handlers.
   let ownedToggleButton = null;
-  const TOGGLE_OWNER = 'spicytr-55';
+  const TOGGLE_OWNER = 'spicytr-55-1';
   function handleToggleClick(event) {
     if (disposed || !ownedToggleButton) return;
     const target = event.target;
     // An obsolete V47/V49 button may have appeared during an old observer
-    // callback. Route those clicks into V55 state rather than old onclick.
+    // callback. Route those clicks into V55.1 state rather than old onclick.
     const clickedButton = target instanceof Element && target.closest('#spicy-tr-toggle-btn');
     if (!clickedButton || !clickedButton.closest('#SpicyLyricsPage .ViewControls')) return;
     event.preventDefault();
@@ -1649,6 +1710,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       // Stop ongoing and scheduled work and immediately REMOVE every overlay.
       // CSS also remains as a failsafe in case an older async callback runs.
       abortOngoingWork();
+      queueRunning = false;
       clearTimeout(batchTimer); batchTimer = null;
       inFlight.clear();
       needsRomajaRefetch.clear();
@@ -1702,6 +1764,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     // (Spicetify's own supported modal API) instead of prompt()/confirm().
     function applySettings(rawInput, resetCache = false) {
       abortOngoingWork();
+      queueRunning = false;
       clearTimeout(batchTimer); batchTimer = null;
       geminiApiKeys = Array.from(new Set(
         rawInput.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
@@ -1710,6 +1773,14 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       failedUntil.clear();
       inFlight.clear();
       needsRomajaRefetch.clear();
+      if (geminiApiKeys.length > 0) {
+        for (const [cacheKey, item] of rawCacheEntries()) {
+          if (!item || !['gtx', 'mymemory', 'legacy', 'romanization'].includes(item.source)) continue;
+          item.nextGeminiAt = 0;
+          rawCacheSet(cacheKey, item);
+        }
+        saveCache();
+      }
       // Saving API keys or toggling quality mode does not destroy successful
       // translations. Only an explicit reset wipes the translation cache.
       if (resetCache) {
@@ -1942,13 +2013,30 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
   }
 
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
-  const observer = new MutationObserver(() => {
-    try { scheduleScan(); } catch (e) { err('MutationObserver hata verdi:', e); }
+  function mutationTouchesLyricsPage(mutation) {
+    const target = mutation.target;
+    const targetElement = target instanceof Element ? target : target?.parentElement;
+    if (targetElement?.closest?.('#SpicyLyricsPage')) return true;
+    for (const node of [...mutation.addedNodes, ...mutation.removedNodes]) {
+      if (node.nodeType !== 1) continue;
+      if (node.id === 'SpicyLyricsPage' || node.matches?.('#SpicyLyricsPage') ||
+          node.querySelector?.('#SpicyLyricsPage') || node.closest?.('#SpicyLyricsPage')) return true;
+    }
+    return false;
+  }
+  const observer = new MutationObserver((mutations) => {
+    try {
+      if (mutations.some(mutationTouchesLyricsPage)) scheduleScan();
+    } catch (e) { err('MutationObserver hata verdi:', e); }
   });
   window._spicyTrObserver = observer;
   observer.observe(document.body, { childList: true, subtree: true });
 
-  const scrollHandler = () => scheduleScan();
+  const scrollHandler = (event) => {
+    const target = event?.target;
+    if (target === document || target === document.documentElement || target === document.body ||
+        target?.closest?.('#SpicyLyricsPage')) scheduleScan();
+  };
   window.addEventListener('scroll', scrollHandler, true);
 
   let lastKnownPos = null;
@@ -2010,6 +2098,9 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
   window.__spicyTRCleanup = function () {
     disposed = true;
     abortOngoingWork();
+    queueRunning = false;
+    inFlight.clear();
+    needsRomajaRefetch.clear();
     try { observer.disconnect(); } catch (e) {}
     try { clearInterval(watchdogInterval); } catch (e) {}
     try { clearTimeout(batchTimer); } catch (e) {}
