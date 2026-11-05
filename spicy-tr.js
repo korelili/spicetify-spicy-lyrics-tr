@@ -1,16 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 56.0.0
-// V56.0.0: AI-first lyric localization, project-scoped quota cooldowns, ID-safe responses, lazy cache refresh and scoped styling;
-// Preserve saved API keys, cache identity, toggle behavior, and existing Spicy Lyrics UI.
-// Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
+// VERSION: 57.0.0
+// V57.0.0: AI-first lyric localization, project-scoped quota cooldowns, ID-safe responses, lazy cache refresh and scoped styling;
+// Preserve saved API keys, toggle behavior, and existing Spicy Lyrics UI.
+// V57 intentionally purges every legacy translation cache before fresh localization.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV56() {
+(function spicyTurkishProV57() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V56.0.0]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V56.0.0]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V56.0.0]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V57.0.0]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V57.0.0]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V57.0.0]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -46,12 +46,36 @@
     }
   }
 
-  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v35';
+  const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v57';
+  const LEGACY_TRANSLATION_CACHE_KEY = /^spicy_tr_(?:persistent_cache(?:_|$)|marketplace(?:_|$)|stable(?:_|$)|ultimate(?:_|$)|unbreakable(?:_|$)|godmode(?:_|$)|translation_cache(?:_|$)|lyrics_cache(?:_|$)|cache(?:_|$))/i;
+  function purgeTranslationCacheStorage(includeCurrent = false) {
+    let removed = 0;
+    const clearStore = (store) => {
+      if (!store) return;
+      const keys = [];
+      for (let i = store.length - 1; i >= 0; i--) {
+        const key = store.key(i);
+        if (!key || (!includeCurrent && key === STORAGE_CACHE_KEY)) continue;
+        if (key === STORAGE_CACHE_KEY || LEGACY_TRANSLATION_CACHE_KEY.test(key)) keys.push(key);
+      }
+      for (const key of keys) {
+        try { store.removeItem(key); removed++; } catch (e) {}
+      }
+    };
+    try { clearStore(localStorage); } catch (e) {}
+    try { clearStore(sessionStorage); } catch (e) {}
+    return removed;
+  }
+  // V57 starts with a genuinely empty translation cache. API keys, quality
+  // preferences and API backoff records are deliberately preserved.
+  const startupPurgedLegacyCacheCount = purgeTranslationCacheStorage(false);
+  let lastCacheClearAt = 0;
+  let lastCacheClearRemoved = 0;
 
   // Lines with profanity, sexual slang, or high-context idioms must not be
   // displayed from context-free machine fallbacks when Gemini keys exist.
   // They remain queued for contextual Gemini localization instead.
-  const CONTEXTUAL_QUALITY_VERSION = 1;
+  const CONTEXTUAL_QUALITY_VERSION = 2;
   const CONTEXTUAL_RISK_PATTERN = /\b(?:fuck(?:s|ed|er|ers|ing|in)?|shit(?:s|ty)?|bitch(?:es|y)?|pussy|pussies|dick(?:s)?|cock(?:s)?|cum(?:ming)?|asshole|ass(?:es)?|whore(?:s)?|hoes?|ho|thots?|sluts?|tits?|boobs?|clit)\b'?|\b(?:hangover|pouring\s+for\s+two|get\s+that\s+paper|save\s+that\s+.{0,30}\s+for\s+later|wrap(?:ping)?\s+['’]?round|wrap(?:ping)?\s+around|ride\s+for\s+you)\b/i;
   function requiresGeminiQuality(text) {
     return CONTEXTUAL_RISK_PATTERN.test(String(text || ''));
@@ -68,16 +92,16 @@
   const inFlight = new Set();
   const needsRomajaRefetch = new Set();
   const failedUntil = new Map();
-  const FAILURE_COOLDOWN_MS = 8000;
+  const FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
   const deadModels = new Map();
   const MODEL_DEAD_SHORT_MS = 45000;
   const MODEL_DEAD_LONG_MS = 6 * 60 * 60 * 1000;
   const MODEL_DEAD_QUOTA_DEFAULT_MS = 30 * 60 * 1000;
   const MODEL_DEAD_QUOTA_MAX_MS = 24 * 60 * 60 * 1000;
   const MODEL_CONFIG_COOLDOWN_MS = 10 * 60 * 1000;
-  const GEMINI_TIMEOUT_MS = 12000;
+  const GEMINI_TIMEOUT_MS = 18000;
   const GEMINI_ATTEMPTS_PER_BATCH = 4; // Bounded failover across distinct quota groups/models.
-  const GEMINI_BATCH_TIME_BUDGET_MS = 21000;
+  const GEMINI_BATCH_TIME_BUDGET_MS = 28000;
   const FALLBACK_UPGRADE_INTERVAL_MS = 2 * 60 * 1000;
   const modelCooldowns = new Map(); // Service/config failures that affect the model across keys.
   const comboCooldowns = new Map(); // Short transient failures scoped to one key + model.
@@ -87,10 +111,10 @@
   let geminiKeyCursor = 0;
   let geminiGloballyDownUntil = 0;
   // One shared serial request stream; real 429 Retry-After is respected.
-  const GEMINI_MIN_START_INTERVAL_MS = 1500;
-  const TRACK_SETTLE_MS = 650;
-  const CACHE_QUALITY_VERSION = 51; // Preserve existing cache identity and known-good entries.
-  const TRANSLATION_PROMPT_VERSION = 2; // Old Gemini/glossary rows are refreshed lazily, one song at a time.
+  const GEMINI_MIN_START_INTERVAL_MS = 1800;
+  const TRACK_SETTLE_MS = 1200;
+  const CACHE_QUALITY_VERSION = 57; // V57 uses a new, empty translation cache namespace.
+  const TRANSLATION_PROMPT_VERSION = 3; // Contextual lyric localization prompt, V57.
   let nextGeminiRequestAt = 0;
   let lastTrackSwitchAt = Date.now();
   let currentSongId = '';
@@ -113,8 +137,8 @@
 
   // The old cache used only the raw lyric as its key. That reused translations
   // across unrelated songs, even when the same words had a different subject,
-  // idiom or meaning. Keep the same localStorage key, but scope new entries to
-  // the Spotify track identity. Old romanization-only entries remain reusable.
+  // idiom or meaning. V57 uses a fresh storage namespace and scopes entries to
+  // the Spotify track identity.
   const CACHE_KEY_SEPARATOR = '\u001f';
   const rawCacheGet = Map.prototype.get.bind(cache);
   const rawCacheSet = Map.prototype.set.bind(cache);
@@ -151,6 +175,22 @@
     const legacyDeleted = rawCacheDelete(String(text));
     return scopedDeleted || legacyDeleted;
   };
+  function clearTranslationCache() {
+    abortOngoingWork();
+    queueRunning = false;
+    clearTimeout(batchTimer); batchTimer = null;
+    clearTimeout(postResetScanTimer); postResetScanTimer = null;
+    clearScheduledScans();
+    inFlight.clear();
+    needsRomajaRefetch.clear();
+    failedUntil.clear();
+    cache.clear();
+    lastCacheClearRemoved = purgeTranslationCacheStorage(true);
+    lastCacheClearAt = Date.now();
+    currentSongId = trackIdentity() || currentSongId;
+    clearRenderedSubtitles();
+    return { cacheLines: cache.size, removedStorageKeys: lastCacheClearRemoved };
+  }
 
   function invalidateTrackWork() {
     abortOngoingWork();
@@ -161,11 +201,13 @@
     needsRomajaRefetch.clear();
     clearTimeout(batchTimer);
     batchTimer = null;
+    clearScheduledScans();
     lastTrackSwitchAt = Date.now();
     stats.trackSwitches++;
   }
-  window.__spicyTRDiagnostics = () => ({ version: '56.0.0', enabled: isEnabled, ...stats,
-    currentSong: currentSongId, cacheLines: cache.size,
+  window.__spicyTRDiagnostics = () => ({ version: '57.0.0', enabled: isEnabled, ...stats,
+    currentSong: currentSongId, cacheLines: cache.size, cacheStorageKey: STORAGE_CACHE_KEY,
+    startupPurgedLegacyCacheCount, lastCacheClearAt, lastCacheClearRemoved,
     inFlightLines: inFlight.size, queueRunning,
     availableModels: GEMINI_MODELS.filter(m => geminiApiKeys.some(k => isGeminiComboReady(k, m))),
     nextRequestInSec: Math.max(0, Math.ceil((nextGeminiRequestAt - Date.now()) / 1000)),
@@ -256,12 +298,17 @@
     } catch (e) {}
   }
   loadBackoffState();
-
-  // Quality-first order: use the strongest current Flash model first; keep Lite models as fallbacks.
-  // This does not add requests; the shared Gemini start interval remains 1.5 seconds.
+  if (startupPurgedLegacyCacheCount > 0) {
+    log(`V57 ilk açılışta ${startupPurgedLegacyCacheCount} eski çeviri önbelleği anahtarını sildi; API anahtarları ve kota beklemeleri korundu.`);
+  }
+  
+  // Quality-first order: use current stable Flash models first; keep Lite models as fallbacks.
+  // This does not add requests; the shared Gemini start interval is deliberately paced.
   const GEMINI_MODELS = [
     'gemini-3.8-flash',
+    'gemini-3.7-flash',
     'gemini-3.6-flash',
+    'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite'
   ];
@@ -273,6 +320,10 @@
   // Default ON for AI-first translation; an explicit saved false keeps the user's fallback preference.
   let qualityMode = localStorage.getItem(QUALITY_MODE_KEY) !== 'false';
   let batchTimer = null;
+  let postResetScanTimer = null;
+  let scanScheduled = false;
+  let scanScheduledTimer = null;
+  const multiStageScanTimers = new Set();
 
   const GEMINI_KEYS_STORAGE = 'spicy_tr_gemini_keys';
   function keyFp(key) {
@@ -320,7 +371,7 @@
   }
 
   const MAX_LINES_PER_GEMINI_CALL = 30;
-  const GEMINI_MAX_OUTPUT_TOKENS = 3072;
+  const GEMINI_MAX_OUTPUT_TOKENS = 6144;
   const GEMINI_FALLBACK_GRACE_MS = 800;
 
   // No raw API keys, even a short hash, are persisted in cache/backoff keys.
@@ -394,7 +445,7 @@
     } catch (e) {}
   }
 
-  const TURKISH_COMMON_WORDS = /\b(bir|bu|şu|ben|sen|biz|siz|değil|gibi|için|ama|çok|var|yok|ile|ne|nasıl|neden|her|daha|olan|oldu|olacak|sanki|kadar|benim|senin|onun|beni|seni|bana|sana|gel|gelse|değilsin|yine|hep|artık|belki|hiç)\b/i;
+  const TURKISH_COMMON_WORDS = /\b(bir|bu|şu|ben|sen|biz|siz|değil|gibi|için|ama|çok|var|yok|ile|ne|nasıl|neden|her|daha|olan|oldu|olacak|sanki|kadar|benim|senin|onun|beni|seni|bana|sana|benimle|seninle|gel|gelse|değilsin|yine|hep|artık|belki|hiç|hadi|al|ver|kal|ol|git|bunu|şimdi|hepsi|herkes|istiyorum|istiyorsun|istersen|vereceğim|veririm|yeniden)\b/i;
   function looksTurkish(text) {
     if (!text) return false;
     // Mixed-script lyrics must still be translated; a Turkish-looking fragment
@@ -584,7 +635,7 @@
   // guard in an independently named stylesheet old versions do not know.
   // An old instance can still spend API quota: uninstall duplicates.
   const offGuardStyle = document.createElement('style');
-  offGuardStyle.id = 'spicy-tr-v56-off-guard';
+  offGuardStyle.id = 'spicy-tr-v57-off-guard';
   offGuardStyle.textContent = `
     html.spicy-tr-off #SpicyLyricsPage .spicy-tr-box,
     html.spicy-tr-off #SpicyLyricsPage .spicy-tr-turkish,
@@ -610,7 +661,7 @@
     });
   }
   applyEnabledClass();
-  if (!isEnabled) clearRenderedSubtitles();
+  clearRenderedSubtitles();
 
   let resizeTimer;
   function triggerRecalc() {
@@ -793,6 +844,24 @@ function isNonLatin(text) {
     if (looksGluedTranslation(original, translated)) return false;
     if (/<[^>]*>|&(?:#\d+|[a-z]+);/i.test(translated)) return false;
     if (cleanPhrase(original).includes('talk to me') && /konuşma cihaz/i.test(translated)) return false;
+
+    // Reject English grammar left in the Turkish field (for example, "I'm reborn").
+    // Genuine song/artist names are stripped before this check so a title can
+    // remain in a Turkish sentence without making the whole line look untranslated.
+    const sourceHasWords = /[A-Za-z]{2,}/.test(original);
+    const sourceIsStandaloneCredit = cleanPhrase(original) === cleanPhrase(songTitle) ||
+      cleanPhrase(original) === cleanPhrase(artist);
+    const isBamBamRibbonTrack = cleanPhrase(songTitle).replace(/\s+/g, '') === 'ribbon' &&
+      /bambam/.test(cleanPhrase(artist));
+    if (isBamBamRibbonTrack && cleanPhrase(original) === 'im ribbon' && /kurdele/i.test(translated)) return false;
+    if (isBamBamRibbonTrack && /풀어봐/.test(original) && !/kurdele/i.test(translated)) return false;
+    let translatedWithoutNames = String(translated);
+    for (const name of [songTitle, artist].filter(Boolean)) {
+      const escapedName = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (escapedName) translatedWithoutNames = translatedWithoutNames.replace(new RegExp(escapedName, 'gi'), ' ');
+    }
+    const untranslatedEnglish = /\b(?:i['’]?m|i\s+am|you(?:['’]?re|\s+are)?|my|me|we|our|they|he|she|it|the|an|and|but|or|to|for|of|in|on|with|is|are|was|were|be|been|does|did|have|has|had|will|would|can|could|should|what|when|where|why|how|now|here|there|wanna|gonna|gotta|reborn|born|ribbon|everything|fine|look|stay|feel|light|tonight|fault|girl|baby)\b/i;
+    if (sourceHasWords && untranslatedEnglish.test(translatedWithoutNames) && !sourceIsStandaloneCredit) return false;
 
     // A Turkish subtitle must not accidentally contain a whole untranslated
     // Korean/Japanese/Chinese/Thai/Cyrillic/Arabic line. A few proper-name
@@ -986,9 +1055,19 @@ function isNonLatin(text) {
     return normalizeItems(objects);
   }
 
+  function getTrackContextHint(songTitle, artist) {
+    const title = cleanPhrase(songTitle).replace(/\s+/g, '');
+    const artists = cleanPhrase(artist);
+    if (title === 'ribbon' && /bambam/.test(artists)) {
+      return `SPECIAL CONTEXT FOR THIS TRACK (BamBam — riBBon): The title is a deliberate double meaning: English “reborn” (yeniden doğmak) and “ribbon” (kurdele); BamBam has explained that both meanings are intentional. The song is about a hopeful new beginning and presenting a renewed self, while also using ribbon/unwrapping a gift imagery. Translate “I'm riBBon” with the rebirth meaning (for example, “Yeniden doğdum”), NOT as “Ben bir kurdeleyim” and NOT by copying the English. When the lyric says “RiBBon을 풀어봐”, keep the literal gift/ribbon image (for example, “Kurdeleyi çöz bakalım”). “무엇을 원해 원해” is a direct question/offer in context (“Ne istersin, ne istersin?” / “Ne istersen, ne istersen?”); choose the natural Turkish phrasing that fits the neighboring line. “뭐든 다 줄게 For sure” means “Ne istersen hepsini vereceğim, kesinlikle.” Do not apply this note to unrelated tracks.`;
+    }
+    return '';
+  }
+
   async function translateChunkWithGemini(chunkLines, allSongLines, epoch) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
     const artist = Spicetify?.Player?.data?.item?.artists?.map(a => a.name).filter(Boolean).join(', ') || 'Unknown Artist';
+    const trackContextHint = getTrackContextHint(songTitle, artist);
     const firstIndex = Math.max(0, allSongLines.indexOf(chunkLines[0]));
     const endIndex = Math.max(firstIndex, allSongLines.indexOf(chunkLines[chunkLines.length - 1]));
     const contextLinesText = allSongLines.slice(Math.max(0, firstIndex - 4), endIndex + 5)
@@ -996,7 +1075,9 @@ function isNonLatin(text) {
     const targetLinesText = chunkLines.map((line, index) => `[ID:${index + 1}] ${line}`).join('\n');
     const prompt = `You are a professional multilingual song-lyric localizer. Translate the target lyrics into fluent, natural Turkish.
 Song: ${songTitle} — ${artist}
-
+${trackContextHint ? `
+${trackContextHint}
+` : ''}
 Nearby lyrics for context only:
 ${contextLinesText}
 
@@ -1007,8 +1088,9 @@ RULES
 - Translate meaning and intent, not isolated dictionary words. Read the lines as one connected stanza and use context to resolve pronouns, omitted subjects, tense, idioms and wordplay.
 - Keep Turkish conversational and natural. Preserve the speaker, addressee, negation, tense, number, emotional tone and metaphors.
 - Do not censor, sanitize or soften profanity, sexual language, insults or slang. Choose the actual Turkish equivalent that fits this exact context; never replace explicit words with vague euphemisms. In a crude sexual context, keep words such as "pussy" and "dick" equally explicit in Turkish; do not turn them into "ora" or "özel bölge". Do not mechanically translate "fuckin'" as "lanet olasıcasına"; determine whether it is an action, insult or intensifier.
-- For Korean/English mixed lines, translate all ordinary Korean and English meaning. Keep only genuine names, titles and intentional signature hooks in their original language. Repetition alone does not make a phrase a hook: translate ordinary phrases such as "Breathe in", "Breathe out" and "You and me now".
-- Do not leave ordinary source-language words untranslated. Translate "Talk to me" as "Benimle konuş", never as a device or object. Do not put romanization in the Turkish field.
+- For Korean/English mixed lines, translate every ordinary Korean and English word into Turkish. A line is not exempt just because it contains the song title, a repeated phrase, a stylized spelling or a hook.
+- Keep a title/name only when it is functioning as a proper name by itself. If it is part of a sentence, translate the sentence's intended meaning while preserving the wordplay naturally; never copy a whole English clause into the Turkish field.
+- Do not leave ordinary source-language words untranslated. Translate "Talk to me" as "Benimle konuş", never as a device or object. Translate "I'm riBBon" by meaning when the track-specific note applies. Do not put romanization in the Turkish field.
 - Preserve repetitions, ad-libs, parentheses and unfinished line fragments. Do not invent actions, causes or emotions.
 - The "rom" field is only a readable Latin-script pronunciation of the original non-Latin text. It is not a translation. Use an empty string for Latin-script source lines.
 - Before returning, compare each Turkish line with its source for meaning, subject, negation and natural phrasing.
@@ -1556,7 +1638,7 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && anyWarn ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
     if (!isEnabled) {
-      btn.title = 'SpicyTR V56.0.0 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
+      btn.title = 'SpicyTR V57.0.0 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
       return;
     }
 
@@ -1577,10 +1659,10 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V56.0.0 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
+        ? `SpicyTR V57.0.0 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
-    btn.title = `[SpicyTR V56.0.0${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
+    btn.title = `[SpicyTR V57.0.0${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
   }
 
   // The Spicy Lyrics controls are React-managed. A button-local onclick is
@@ -1588,12 +1670,12 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
   // click. Use one delegated, capture-phase handler for our owned button.
   // It survives React replacing the toolbar and blocks ancestor click handlers.
   let ownedToggleButton = null;
-  const TOGGLE_OWNER = 'spicytr-56-0';
+  const TOGGLE_OWNER = 'spicytr-57-0';
   function handleToggleClick(event) {
     if (disposed || !ownedToggleButton) return;
     const target = event.target;
     // An obsolete V47/V49 button may have appeared during an old observer
-    // callback. Route those clicks into V56.0 state rather than old onclick.
+    // callback. Route those clicks into V57.0 state rather than old onclick.
     const clickedButton = target instanceof Element && target.closest('#spicy-tr-toggle-btn');
     if (!clickedButton || !clickedButton.closest('#SpicyLyricsPage .ViewControls')) return;
     event.preventDefault();
@@ -1614,6 +1696,7 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
       abortOngoingWork();
       queueRunning = false;
       clearTimeout(batchTimer); batchTimer = null;
+      clearScheduledScans();
       inFlight.clear();
       needsRomajaRefetch.clear();
       applyEnabledClass();
@@ -1667,7 +1750,9 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
     function applySettings(rawInput, resetCache = false) {
       abortOngoingWork();
       queueRunning = false;
+      clearScheduledScans();
       clearTimeout(batchTimer); batchTimer = null;
+      clearTimeout(postResetScanTimer); postResetScanTimer = null;
       const parsedEntries = rawInput.split(/[,\n]+/).map(entry => {
         const value = entry.trim();
         if (!value) return null;
@@ -1691,6 +1776,22 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
       failedUntil.clear();
       inFlight.clear();
       needsRomajaRefetch.clear();
+
+      if (resetCache) {
+        // Remove every old SpicyTR translation namespace plus V57's active one.
+        // API keys and 429/503 backoff records remain untouched.
+        const cleared = clearTranslationCache();
+        refreshToggleButtonVisual(btn);
+        try { Spicetify.showNotification?.(
+          `Önbellek tamamen sıfırlandı (${cleared.removedStorageKeys} kayıt silindi). Eski çeviriler gösterilmeyecek; yeni çeviri 1,2 sn sonra başlayacak.`
+        ); } catch (e5) {}
+        postResetScanTimer = setTimeout(() => {
+          postResetScanTimer = null;
+          if (!disposed && isEnabled) triggerMultiStageScan();
+        }, 1200);
+        return;
+      }
+
       if (geminiApiKeys.length > 0) {
         for (const [cacheKey, item] of rawCacheEntries()) {
           if (!item || !['gtx', 'mymemory', 'legacy', 'romanization'].includes(item.source)) continue;
@@ -1699,21 +1800,10 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
         }
         saveCache();
       }
-      // Saving API keys or toggling quality mode does not destroy successful
-      // translations. Only an explicit reset wipes the translation cache.
-      if (resetCache) {
-        // Preserve 429/503 cooldowns even across manual cache reset.
-        cache.clear();
-        try { localStorage.removeItem(STORAGE_CACHE_KEY); } catch (e4) {}
-        saveBackoffState();
-        saveCache();
-      }
-      document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(el => el.remove());
+      clearRenderedSubtitles();
       refreshToggleButtonVisual(btn);
       triggerMultiStageScan();
-      try { Spicetify.showNotification?.(resetCache ?
-        'Önbellek temizlendi; yeniden çeviri istekleri yapılacak.' :
-        'Ayarlar kaydedildi; mevcut çeviriler korundu.'); } catch (e5) {}
+      try { Spicetify.showNotification?.('Ayarlar kaydedildi; mevcut çeviri önbelleği korundu.'); } catch (e5) {}
     }
 
     function openKeySettingsModal() {
@@ -1777,7 +1867,7 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
       const warnText = document.createElement('div');
       warnText.style.fontSize = '12px';
       warnText.style.opacity = '0.75';
-      warnText.textContent = `Önbellek: ${cache.size} satır. Kaydet mevcut çevirileri korur. Sadece ayrı 'Önbelleği sıfırla' düğmesi eski çevirileri siler ve yeni API kotası harcar.`;
+      warnText.textContent = `Önbellek: ${cache.size} satır. Kaydet mevcut çevirileri korur. 'Önbelleği sıfırla' tüm eski SpicyTR sürümlerinin çeviri kayıtlarını ve ekrandaki çeviri kutularını siler; API anahtarlarını korur ve yeni çeviriyi yeniden üretir.`;
       wrap.appendChild(warnText);
 
       const btnRow = document.createElement('div');
@@ -1812,7 +1902,7 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
         Spicetify.PopupModal.hide();
       };
       const resetBtn = mkBtn('Önbelleği sıfırla', false);
-      resetBtn.title = 'Tüm çevirileri siler; yeniden Gemini kotası tüketilir';
+      resetBtn.title = 'Tüm eski ve yeni çeviri kayıtlarını siler; API anahtarlarını ve kota beklemelerini korur.';
       resetBtn.onclick = () => {
         qualityMode = qualityInput.checked;
         localStorage.setItem(QUALITY_MODE_KEY, String(qualityMode));
@@ -1915,23 +2005,36 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
     try { scanLines(); } catch (e) { err('scanLines hata verdi:', e); }
   }
 
-  let scanScheduled = false;
+  function clearScheduledScans() {
+    if (scanScheduledTimer !== null) {
+      clearTimeout(scanScheduledTimer);
+      scanScheduledTimer = null;
+    }
+    for (const timer of multiStageScanTimers) clearTimeout(timer);
+    multiStageScanTimers.clear();
+    scanScheduled = false;
+  }
+
   function scheduleScan() {
     if (disposed || scanScheduled) return;
     scanScheduled = true;
-    setTimeout(() => {
+    scanScheduledTimer = setTimeout(() => {
       scanScheduled = false;
+      scanScheduledTimer = null;
       safeScanLines();
     }, 80);
   }
 
   function triggerMultiStageScan() {
     if (disposed) return;
-    safeScanLines();
-    setTimeout(safeScanLines, 100);
-    setTimeout(safeScanLines, 300);
-    setTimeout(safeScanLines, 600);
-    setTimeout(safeScanLines, 1200);
+    clearScheduledScans();
+    for (const delay of [0, 100, 300, 600, 1200]) {
+      const timer = setTimeout(() => {
+        multiStageScanTimers.delete(timer);
+        safeScanLines();
+      }, delay);
+      multiStageScanTimers.add(timer);
+    }
   }
 
   if (window._spicyTrObserver) window._spicyTrObserver.disconnect();
@@ -2026,6 +2129,8 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
     try { observer.disconnect(); } catch (e) {}
     try { clearInterval(watchdogInterval); } catch (e) {}
     try { clearTimeout(batchTimer); } catch (e) {}
+    try { clearTimeout(postResetScanTimer); } catch (e) {}
+    try { clearScheduledScans(); } catch (e) {}
     try { window.removeEventListener('scroll', scrollHandler, true); } catch (e) {}
     try { document.removeEventListener('click', handleToggleClick, true); } catch (e) {}
     try {
