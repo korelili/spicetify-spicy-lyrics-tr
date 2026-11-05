@@ -1,16 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 55.1.0
-// V55.1: explicit lyric localization, per-key quota cooldowns, cancellable queue, scoped observer, and Korean credit romanization;
+// VERSION: 56.0.0
+// V56.0.0: AI-first lyric localization, project-scoped quota cooldowns, ID-safe responses, lazy cache refresh and scoped styling;
 // Preserve saved API keys, cache identity, toggle behavior, and existing Spicy Lyrics UI.
 // Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV551() {
+(function spicyTurkishProV56() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V55.1]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V55.1]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V55.1]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V56.0.0]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V56.0.0]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V56.0.0]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -36,7 +36,6 @@
 
   let geminiLastError = '';
   let gtxLastError = '';
-  let mmLastError = '';
 
   if (typeof window.__spicyTRCleanup === 'function') {
     try {
@@ -46,17 +45,6 @@
       err('Önceki örnek temizlenirken hata (yine de devam ediliyor):', e);
     }
   }
-
-  [
-    'spicy_tr_persistent_cache_v5', 'spicy_tr_persistent_cache_v12_final',
-    'spicy_tr_marketplace_v19', 'spicy_tr_stable_v20', 'spicy_tr_ultimate_v21',
-    'spicy_tr_unbreakable_v22', 'spicy_tr_godmode_v23', 'spicy_tr_godmode_v26',
-    'spicy_tr_godmode_v27', 'spicy_tr_godmode_v28', 'spicy_tr_godmode_v29',
-    'spicy_tr_godmode_v30', 'spicy_tr_godmode_v31', 'spicy_tr_godmode_v32',
-    'spicy_tr_godmode_v33', 'spicy_tr_godmode_v34'
-    // 'spicy_tr_godmode_v35' deliberately stays as the live cache key below -
-    // do not bump this just to "freshen" things, it wipes everyone's cache.
-  ].forEach(k => localStorage.removeItem(k));
 
   const STORAGE_CACHE_KEY = 'spicy_tr_godmode_v35';
 
@@ -87,28 +75,28 @@
   const MODEL_DEAD_QUOTA_DEFAULT_MS = 30 * 60 * 1000;
   const MODEL_DEAD_QUOTA_MAX_MS = 24 * 60 * 60 * 1000;
   const MODEL_CONFIG_COOLDOWN_MS = 10 * 60 * 1000;
-  const GEMINI_TIMEOUT_MS = 9000;
-  const GEMINI_ATTEMPTS_PER_BATCH = 4; // Bounded failover; a 429 on one key no longer blocks the next key.
-  const GEMINI_BATCH_TIME_BUDGET_MS = 14000;
+  const GEMINI_TIMEOUT_MS = 12000;
+  const GEMINI_ATTEMPTS_PER_BATCH = 4; // Bounded failover across distinct quota groups/models.
+  const GEMINI_BATCH_TIME_BUDGET_MS = 21000;
   const FALLBACK_UPGRADE_INTERVAL_MS = 2 * 60 * 1000;
   const modelCooldowns = new Map(); // Service/config failures that affect the model across keys.
-  const comboCooldowns = new Map(); // 429/timeouts scoped to one API-key + model combination.
+  const comboCooldowns = new Map(); // Short transient failures scoped to one key + model.
   const keyCooldowns = new Map();   // Invalid-key failures affect only that key.
+  const projectCooldowns = new Map(); // Gemini 429 limits are shared by keys in the same project.
   const simpleModels = new Set();   // Models that need a simpler response config.
   let geminiKeyCursor = 0;
-  const GEMINI_BACKOFF_STEPS_MS = [30000, 60000, 120000, 180000]; // kept for state compatibility
   let geminiGloballyDownUntil = 0;
-  let geminiBackoffStage = 0;
-  // One shared serial request stream. No artificial 9-second wait; real 429 Retry-After is respected.
+  // One shared serial request stream; real 429 Retry-After is respected.
   const GEMINI_MIN_START_INTERVAL_MS = 1500;
   const TRACK_SETTLE_MS = 650;
-  const CACHE_QUALITY_VERSION = 51; // Keep existing good Gemini cache entries.
+  const CACHE_QUALITY_VERSION = 51; // Preserve existing cache identity and known-good entries.
+  const TRANSLATION_PROMPT_VERSION = 2; // Old Gemini/glossary rows are refreshed lazily, one song at a time.
   let nextGeminiRequestAt = 0;
   let lastTrackSwitchAt = Date.now();
   let currentSongId = '';
   let queueRunning = false;
   const stats = { geminiCalls: 0, geminiSuccess: 0, http429: 0, http503: 0,
-    cancelled: 0, trackSwitches: 0, cacheReuse: 0, stalePurged: 0 };
+    trackSwitches: 0, cacheReuse: 0, stalePurged: 0 };
   async function waitForGeminiSlot(epoch) {
     while (Date.now() < nextGeminiRequestAt) {
       if (disposed || epoch !== generationId || !isEnabled) throw new Error('İstek iptal edildi');
@@ -151,6 +139,7 @@
   cache.set = function (text, value) {
     const trackId = activeCacheTrackId();
     const nextValue = { ...(value || {}), songId: trackId };
+    if (nextValue.source === 'gemini') nextValue.promptVersion = TRANSLATION_PROMPT_VERSION;
     if (requiresGeminiQuality(text)) {
       nextValue.contextualQualityVersion = CONTEXTUAL_QUALITY_VERSION;
     }
@@ -175,13 +164,15 @@
     lastTrackSwitchAt = Date.now();
     stats.trackSwitches++;
   }
-  window.__spicyTRDiagnostics = () => ({ version: '55.1.0', enabled: isEnabled, ...stats,
+  window.__spicyTRDiagnostics = () => ({ version: '56.0.0', enabled: isEnabled, ...stats,
     currentSong: currentSongId, cacheLines: cache.size,
     inFlightLines: inFlight.size, queueRunning,
     availableModels: GEMINI_MODELS.filter(m => geminiApiKeys.some(k => isGeminiComboReady(k, m))),
     nextRequestInSec: Math.max(0, Math.ceil((nextGeminiRequestAt - Date.now()) / 1000)),
     fallbackEnabled: !qualityMode, geminiMinStartIntervalMs: GEMINI_MIN_START_INTERVAL_MS,
     contextualGeminiOnlyLines: true, perKeyModelCooldowns: comboCooldowns.size,
+    quotaGroups: new Set(geminiApiKeys.map(quotaGroupId)).size,
+    projectCooldowns: projectCooldowns.size,
     maxLinesPerGeminiCall: MAX_LINES_PER_GEMINI_CALL, geminiTimeoutMs: GEMINI_TIMEOUT_MS,
     nextAvailableInSec: Math.max(0, Math.ceil((nextGeminiAvailableAt() - Date.now()) / 1000)),
     lastError: geminiLastError
@@ -193,23 +184,18 @@
   let gtxBackoffStage = 0;
   let gtxConsecutiveFailures = 0;
 
-  const MM_BACKOFF_STEPS_MS = [30000, 60000, 120000, 240000, 480000, 900000, 1800000];
-  const MM_FAIL_THRESHOLD = 5;
-  let mmGloballyDownUntil = 0;
-  let mmBackoffStage = 0;
-  let mmConsecutiveFailures = 0;
 
   const BACKOFF_STATE_KEY = 'spicy_tr_backoff_state_v1';
   function saveBackoffState() {
     try {
       const state = {
-        cooldownSchema: 2,
+        cooldownSchema: 3,
         gtxGloballyDownUntil, gtxBackoffStage,
-        mmGloballyDownUntil, mmBackoffStage,
         deadModels: Array.from(deadModels.entries()),
         modelCooldowns: Array.from(modelCooldowns.entries()),
         comboCooldowns: Array.from(comboCooldowns.entries()),
         keyCooldowns: Array.from(keyCooldowns.entries()),
+        projectCooldowns: Array.from(projectCooldowns.entries()),
         simpleModels: Array.from(simpleModels)
       };
       localStorage.setItem(BACKOFF_STATE_KEY, JSON.stringify(state));
@@ -225,10 +211,6 @@
         gtxGloballyDownUntil = state.gtxGloballyDownUntil;
         gtxBackoffStage = state.gtxBackoffStage || 0;
       }
-      if (state.mmGloballyDownUntil > now) {
-        mmGloballyDownUntil = state.mmGloballyDownUntil;
-        mmBackoffStage = state.mmBackoffStage || 0;
-      }
       if (Array.isArray(state.deadModels)) {
         state.deadModels.forEach(([k, until]) => {
           if (Number.isFinite(until) && until > now) deadModels.set(k, until);
@@ -242,7 +224,7 @@
       // V54 stored 429 quota cooldowns in modelCooldowns, which blocked every
       // configured key when only one key/project had reached its quota.
       // Load model/combo cooldowns only from the new, correctly scoped schema.
-      if (state.cooldownSchema === 2) {
+      if (state.cooldownSchema >= 2) {
         if (Array.isArray(state.modelCooldowns)) {
           state.modelCooldowns.forEach(([k, until]) => {
             if (Number.isFinite(until) && until > now) modelCooldowns.set(k, until);
@@ -253,13 +235,21 @@
             if (Number.isFinite(until) && until > now) comboCooldowns.set(k, until);
           });
         }
-      } else {
+      }
+      if (state.cooldownSchema >= 3 && Array.isArray(state.projectCooldowns)) {
+        state.projectCooldowns.forEach(([group, until]) => {
+          if (typeof group === 'string' && Number.isFinite(until) && until > now) {
+            projectCooldowns.set(group, until);
+          }
+        });
+      }
+      if (state.cooldownSchema < 2) {
         log('Eski V54 model-geneli Gemini bekleme kayıtları atlandı; 429 beklemeleri artık anahtar/model bazında tutuluyor.');
       }
       if (Array.isArray(state.simpleModels)) {
         state.simpleModels.filter(x => typeof x === 'string').forEach(x => simpleModels.add(x));
       }
-      if (gtxGloballyDownUntil > now || mmGloballyDownUntil > now ||
+      if (gtxGloballyDownUntil > now ||
           deadModels.size > 0 || comboCooldowns.size > 0 || modelCooldowns.size > 0) {
         log('Geçerli servis ve anahtar/model bekleme süreleri geri yüklendi.');
       }
@@ -278,10 +268,10 @@
 
   let isEnabled = localStorage.getItem('spicy_tr_enabled') !== 'false';
   // An accurate but temporarily missing lyric is better than a misleading mistranslation.
-  // Applies when Gemini keys exist. Users may opt into GTX/MyMemory in settings.
+  // Applies when Gemini keys exist. Users may opt into Google Translate fallback in settings.
   const QUALITY_MODE_KEY = 'spicy_tr_quality_first_v54';
-  // Default OFF: fallback Turkish must remain visible when Gemini is slow or unavailable.
-  let qualityMode = localStorage.getItem(QUALITY_MODE_KEY) === 'true';
+  // Default ON for AI-first translation; an explicit saved false keeps the user's fallback preference.
+  let qualityMode = localStorage.getItem(QUALITY_MODE_KEY) !== 'false';
   let batchTimer = null;
 
   const GEMINI_KEYS_STORAGE = 'spicy_tr_gemini_keys';
@@ -302,8 +292,35 @@
   }
   localStorage.removeItem('spicy_tr_gemini_key');
 
+  function keyFingerprint(apiKey) {
+    let h = 2166136261;
+    for (const ch of String(apiKey || '')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+    return (h >>> 0).toString(16);
+  }
+  const KEY_GROUPS_STORAGE = 'spicy_tr_gemini_key_groups_v1';
+  let geminiKeyGroups = new Map();
+  try {
+    const storedGroups = JSON.parse(localStorage.getItem(KEY_GROUPS_STORAGE) || '{}');
+    for (const key of geminiApiKeys) {
+      const group = storedGroups[keyFingerprint(key)];
+      if (typeof group === 'string' && group.trim()) geminiKeyGroups.set(key, group.trim());
+    }
+  } catch (e) {}
+  function quotaGroupId(apiKey) {
+    // Unlabelled keys are treated as separate projects. To share one quota
+    // cooldown, enter the same project label before each key in settings.
+    return geminiKeyGroups.get(apiKey) || `key:${keyFingerprint(apiKey)}`;
+  }
+  function saveKeyGroups() {
+    try {
+      const stored = {};
+      for (const [key, group] of geminiKeyGroups) stored[keyFingerprint(key)] = group;
+      localStorage.setItem(KEY_GROUPS_STORAGE, JSON.stringify(stored));
+    } catch (e) {}
+  }
+
   const MAX_LINES_PER_GEMINI_CALL = 30;
-  const GEMINI_MAX_OUTPUT_TOKENS = 6144;
+  const GEMINI_MAX_OUTPUT_TOKENS = 3072;
   const GEMINI_FALLBACK_GRACE_MS = 800;
 
   // No raw API keys, even a short hash, are persisted in cache/backoff keys.
@@ -328,6 +345,7 @@
     const id = comboId(key, model);
     return (deadModels.get(id) || 0) <= now &&
       (comboCooldowns.get(id) || 0) <= now &&
+      (projectCooldowns.get(quotaGroupId(key)) || 0) <= now &&
       (keyCooldowns.get(keyId(key)) || 0) <= now &&
       (modelCooldowns.get(model) || 0) <= now;
   }
@@ -338,8 +356,8 @@
     for (const model of GEMINI_MODELS) for (const key of geminiApiKeys) {
       const id = comboId(key, model);
       const next = Math.max(deadModels.get(id) || 0,
-        comboCooldowns.get(id) || 0, keyCooldowns.get(keyId(key)) || 0,
-        modelCooldowns.get(model) || 0);
+        comboCooldowns.get(id) || 0, projectCooldowns.get(quotaGroupId(key)) || 0,
+        keyCooldowns.get(keyId(key)) || 0, modelCooldowns.get(model) || 0);
       if (next <= now) return now;
       earliest = Math.min(earliest, next);
     }
@@ -349,13 +367,14 @@
     // V47 stored artificial global backoff; do not let it outlive real cooldowns.
     const next = nextGeminiAvailableAt();
     geminiGloballyDownUntil = next > Date.now() ? next : 0;
-    geminiBackoffStage = 0;
     return geminiGloballyDownUntil;
   }
   function canUpgradeFallback(text, now = Date.now()) {
     const item = cache.get(text);
+    const staleGemini = item && ['gemini', 'glossary'].includes(item.source) &&
+      (item.promptVersion || 0) < TRANSLATION_PROMPT_VERSION;
     return geminiApiKeys.length > 0 && item &&
-      (!item.tr || ['gtx', 'mymemory', 'legacy', 'romanization'].includes(item.source)) &&
+      (!item.tr || ['gtx', 'mymemory', 'legacy', 'romanization'].includes(item.source) || staleGemini) &&
       (item.nextGeminiAt || 0) <= now && nextGeminiAvailableAt() <= now;
   }
 
@@ -365,7 +384,7 @@
 
   function saveCache() {
     try {
-      // Persist every usable translation source. Gemini may upgrade a GTX/MyMemory
+      // Persist every usable translation source. Gemini may upgrade a Google Translate or legacy fallback
       // result later, but a fallback must never disappear after restart.
       const entries = Array.from(cache.entries()).map(([k, v]) => {
         if (!v || (!v.tr && !v.romaja)) return null;
@@ -378,6 +397,9 @@
   const TURKISH_COMMON_WORDS = /\b(bir|bu|şu|ben|sen|biz|siz|değil|gibi|için|ama|çok|var|yok|ile|ne|nasıl|neden|her|daha|olan|oldu|olacak|sanki|kadar|benim|senin|onun|beni|seni|bana|sana|gel|gelse|değilsin|yine|hep|artık|belki|hiç)\b/i;
   function looksTurkish(text) {
     if (!text) return false;
+    // Mixed-script lyrics must still be translated; a Turkish-looking fragment
+    // must not cause the whole Korean/Japanese/Chinese line to be skipped.
+    if (isNonLatin(text)) return false;
     if (/[çÇğĞıİşŞöÖüÜ]/.test(text)) return true;
     const words = text.toLowerCase().split(/\s+/).filter(Boolean);
     if (words.length === 0) return false;
@@ -387,7 +409,7 @@
 
   // (V44) Detects translator output that is obviously glued together with
   // no word boundaries - the failure mode behind lines like
-  // "Wayuphighlikemybilincim" or "Çünkühiçbirisenisikiyor". GTX/MyMemory
+  // "Wayuphighlikemybilincim" or "Çünkühiçbirisenisikiyor". Google Translate
   // occasionally return a sentence with missing spaces, and the existing
   // fixGluedWords() can only repair a lowercase->uppercase transition, so
   // an all-lowercase glued run sails straight through untouched.
@@ -506,38 +528,14 @@
   const style = document.createElement('style');
   style.id = 'spicy-tr-style';
   style.textContent = `
-    html:not(.spicy-tr-off) #SpicyLyricsPage .line:not(.musical-line) {
-      display: flex !important;
-      flex-wrap: wrap !important;
-      align-content: flex-start !important;
-      --BlurAmount: 0px !important;
-      filter: none !important;
-      -webkit-filter: none !important;
-    }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-box, html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-box * {
-      color: #ffffff !important;
-      -webkit-text-fill-color: #ffffff !important;
-      text-shadow: none !important;
-      filter: none !important;
-      -webkit-filter: none !important;
-      backdrop-filter: none !important;
-      mix-blend-mode: normal !important;
-      background: transparent !important;
-      -webkit-background-clip: border-box !important;
-      background-clip: border-box !important;
-      mask-image: none !important;
-      -webkit-mask-image: none !important;
-    }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-box {
-      flex-basis: 100% !important;
+    /* Never override Spotify's native lyric rows, blur, opacity or backgrounds. */
+    #SpicyLyricsPage .spicy-tr-box {
+      display: block !important;
       width: 100% !important;
+      flex-basis: 100% !important;
       margin-top: 6px !important;
-      display: flex !important;
-      flex-direction: column !important;
-      gap: 3px !important;
       pointer-events: none !important;
       line-height: 1.35 !important;
-      opacity: 1 !important;
     }
     html.spicy-tr-off #SpicyLyricsPage .spicy-tr-box,
     html.spicy-tr-off #SpicyLyricsPage .spicy-tr-romaja,
@@ -545,27 +543,24 @@
     body.spicy-tr-off #SpicyLyricsPage .spicy-tr-box {
       display: none !important;
     }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-romaja {
+    #SpicyLyricsPage .spicy-tr-romaja {
       font-size: 0.46em !important;
       font-weight: 500 !important;
       color: rgba(255, 255, 255, 0.82) !important;
       -webkit-text-fill-color: rgba(255, 255, 255, 0.82) !important;
-      opacity: 1 !important;
       word-spacing: 2px !important;
     }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-turkish {
+    #SpicyLyricsPage .spicy-tr-turkish {
       font-size: 0.52em !important;
       font-weight: 700 !important;
       color: #ffffff !important;
       -webkit-text-fill-color: #ffffff !important;
-      opacity: 1 !important;
     }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-credit-romaja {
+    #SpicyLyricsPage .spicy-tr-credit-romaja {
       font-size: 0.88em !important;
       font-weight: 500 !important;
       color: rgba(255, 255, 255, 0.72) !important;
       -webkit-text-fill-color: rgba(255, 255, 255, 0.72) !important;
-      opacity: 1 !important;
       white-space: normal !important;
       margin-left: 0.18em !important;
     }
@@ -573,8 +568,6 @@
     body.spicy-tr-off #SpicyLyricsPage .spicy-tr-credit-romaja {
       display: none !important;
     }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .line.NotSung, html:not(.spicy-tr-off) #SpicyLyricsPage .line.Sung { opacity: 0.78 !important; }
-    html:not(.spicy-tr-off) #SpicyLyricsPage .line.Active { opacity: 1 !important; }
     #spicy-tr-toggle-btn {
       background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.3);
       border-radius: 50%; width: 32px; height: 32px; font-size: 10px; font-weight: 800; cursor: pointer;
@@ -591,7 +584,7 @@
   // guard in an independently named stylesheet old versions do not know.
   // An old instance can still spend API quota: uninstall duplicates.
   const offGuardStyle = document.createElement('style');
-  offGuardStyle.id = 'spicy-tr-v52-off-guard';
+  offGuardStyle.id = 'spicy-tr-v56-off-guard';
   offGuardStyle.textContent = `
     html.spicy-tr-off #SpicyLyricsPage .spicy-tr-box,
     html.spicy-tr-off #SpicyLyricsPage .spicy-tr-turkish,
@@ -684,26 +677,6 @@ function isNonLatin(text) {
     return maxCount / tokens.length >= 0.6;
   }
 
-  function detectSourceLangForMyMemory(text) {
-    if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(text)) return 'ko';
-    if (/[぀-ヿ]/.test(text)) return 'ja';
-    if (/[฀-๿]/.test(text)) return 'th';
-    if (/[一-鿿]/.test(text)) return 'zh-CN';
-    return 'en';
-  }
-
-  function fixGluedWords(s) {
-    if (!s) return s;
-    const repeated = splitRepeatingUnit(s);
-    if (repeated) return repeated;
-    return s.replace(/([a-zçğıöşü0-9])([A-ZÇĞİÖŞÜ])/g, '$1 $2');
-  }
-
-  // Spicy Lyrics shows songwriter metadata as a "Written by ..." line.
-  // Romanize Hangul locally so credits never consume Gemini quota or delay lyrics.
-  const HANGUL_INITIALS = ['g', 'kk', 'n', 'd', 'tt', 'r', 'm', 'b', 'pp', 's', 'ss', '', 'j', 'jj', 'ch', 'k', 't', 'p', 'h'];
-  const HANGUL_VOWELS = ['a', 'ae', 'ya', 'yae', 'eo', 'e', 'yeo', 'ye', 'o', 'wa', 'wae', 'oe', 'yo', 'u', 'wo', 'we', 'wi', 'yu', 'eu', 'ui', 'i'];
-  const HANGUL_FINALS = ['', 'k', 'k', 'ks', 'n', 'nj', 'nh', 't', 'l', 'lk', 'lm', 'lb', 'ls', 'lt', 'lp', 'lh', 'm', 'p', 'ps', 't', 't', 'ng', 't', 't', 'k', 't', 'p', 't'];
 
   function romanizeHangulText(value) {
     return Array.from(String(value || '')).map(char => {
@@ -805,33 +778,28 @@ function isNonLatin(text) {
     return t ? t[0].toLocaleUpperCase('tr-TR') + t.slice(1) : '';
   }
 
-  // Very small, language-generic colloquial safeguard for recurring short lyrics.
-  // This is NOT a whole-song hardcoded translation database. Gemini supersedes it.
-  const SAFE_COLLOQUIAL_PHRASES = new Map([
-    ['talk to me', 'Benimle konuş'],
-    ['tell me', 'Söyle bana'],
-    ['tell me whats on your mind', 'Aklından geçenleri söyle bana'],
-    ['whats on your mind', 'Aklından ne geçiyor'],
-    ['here i am baby', 'İşte buradayım, bebeğim'],
-    ['well here i am baby', 'İşte buradayım, bebeğim'],
-    ['if you want it', 'İstersen']
-  ]);
   function cleanPhrase(s) {
     return String(s || '').toLowerCase().replace(/['’‘]/g, '')
-      .replace(/[.,!?;:()"'\-]/g, ' ').replace(/\s+/g, ' ').trim();
+      .replace(/[.,!?;:()"'-]/g, ' ').replace(/\s+/g, ' ').trim();
   }
-  function getSafeColloquialTranslation(rawLine) {
-    const phrases = String(rawLine || '').split(/\s*,\s*/).map(cleanPhrase);
-    if (!phrases.length || phrases.some(p => !SAFE_COLLOQUIAL_PHRASES.has(p))) return '';
-    // A very long repeated ad-lib is intentionally not forced into a fixed phrase.
-    if (phrases.length > 5) return '';
-    return phrases.map(p => SAFE_COLLOQUIAL_PHRASES.get(p)).join(', ');
-  }
-  function isUsableTranslation(original, translated) {
-    if (!translated || normalize(original) === normalize(translated)) return false;
+  function isUsableTranslation(original, translated, songTitle = '', artist = '') {
+    if (!translated) return false;
+    if (normalize(original) === normalize(translated)) {
+      const sourcePhrase = cleanPhrase(original);
+      const metadataPhrases = [songTitle, artist].filter(Boolean).map(cleanPhrase);
+      const withoutVocalTail = sourcePhrase.replace(/(?:\s+(?:a|o|oh|yeah))+$/g, '').trim();
+      if (!metadataPhrases.includes(sourcePhrase) && !metadataPhrases.includes(withoutVocalTail)) return false;
+    }
     if (looksGluedTranslation(original, translated)) return false;
     if (/<[^>]*>|&(?:#\d+|[a-z]+);/i.test(translated)) return false;
     if (cleanPhrase(original).includes('talk to me') && /konuşma cihaz/i.test(translated)) return false;
+
+    // A Turkish subtitle must not accidentally contain a whole untranslated
+    // Korean/Japanese/Chinese/Thai/Cyrillic/Arabic line. A few proper-name
+    // characters are tolerated, but script-heavy output is rejected.
+    const foreignScriptChars = (translated.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0e00-\u0e7f\u0400-\u04ff\u0600-\u06ff]/g) || []).length;
+    const letters = (translated.match(/\p{L}/gu) || []).length;
+    if (letters >= 4 && foreignScriptChars / letters > 0.2) return false;
     return true;
   }
 
@@ -946,30 +914,46 @@ function isNonLatin(text) {
       .trim();
 
     const normalizeItems = (value) => {
-      let items = Array.isArray(value) ? value :
+      const items = Array.isArray(value) ? value :
         (Array.isArray(value?.translations) ? value.translations :
          (Array.isArray(value?.results) ? value.results : null));
       if (!items || !items.length) return null;
-      return items.slice(0, expectedCount).map(item => ({
+
+      const hasAnyId = items.some(item => item && item.id !== undefined && item.id !== null);
+      const normalizeItem = item => ({
         tr: typeof item?.tr === 'string' ? item.tr :
             typeof item?.translation === 'string' ? item.translation :
             typeof item?.turkish === 'string' ? item.turkish : '',
         rom: typeof item?.rom === 'string' ? item.rom :
              typeof item?.romaja === 'string' ? item.romaja :
              typeof item?.romanization === 'string' ? item.romanization : ''
-      }));
+      });
+
+      if (hasAnyId) {
+        const out = Array(expectedCount).fill(null);
+        const seen = new Set();
+        for (const item of items) {
+          const id = Number(item?.id);
+          if (!Number.isInteger(id) || id < 1 || id > expectedCount || seen.has(id)) return null;
+          seen.add(id);
+          out[id - 1] = normalizeItem(item);
+        }
+        return out;
+      }
+
+      // Without explicit IDs, only a complete response can safely be aligned.
+      if (items.length !== expectedCount) return null;
+      return items.map(normalizeItem);
     };
 
     try {
-      const parsed = JSON.parse(cleaned);
-      const normalized = normalizeItems(parsed);
-      if (normalized) return normalized;
+      const parsed = normalizeItems(JSON.parse(cleaned));
+      if (parsed) return parsed;
     } catch (e) {
-      // A truncated response can still contain complete objects worth keeping.
+      // A truncated response may still contain complete ID-tagged objects.
     }
 
-    // Salvage complete objects from a truncated JSON array. Track quoted strings
-    // and escapes so braces inside lyric text do not corrupt the scan.
+    // Salvage complete objects only when each has an explicit, unique line ID.
     const objects = [];
     let depth = 0;
     let objectStart = -1;
@@ -1004,50 +988,32 @@ function isNonLatin(text) {
 
   async function translateChunkWithGemini(chunkLines, allSongLines, epoch) {
     const songTitle = Spicetify?.Player?.data?.item?.name || 'Unknown Song';
-    const artist = Spicetify?.Player?.data?.item?.artists?.[0]?.name || 'Unknown Artist';
-    // Keep context small to avoid 30-line requests timing out, but include surrounding lyrics.
+    const artist = Spicetify?.Player?.data?.item?.artists?.map(a => a.name).filter(Boolean).join(', ') || 'Unknown Artist';
     const firstIndex = Math.max(0, allSongLines.indexOf(chunkLines[0]));
     const endIndex = Math.max(firstIndex, allSongLines.indexOf(chunkLines[chunkLines.length - 1]));
-    const contextLinesText = allSongLines.slice(Math.max(0, firstIndex - 5), endIndex + 6)
-      .map(l => `- ${l}`).join('\n').slice(0, 3500);
-    const targetLinesText = chunkLines.map((l, i) => `${i + 1}. ${l}`).join('\n');
-    const prompt = `You are an expert multilingual song-lyric localizer translating into natural Turkish.
+    const contextLinesText = allSongLines.slice(Math.max(0, firstIndex - 4), endIndex + 5)
+      .map((line, index) => `${Math.max(1, firstIndex - 3) + index}. ${line}`).join('\n').slice(0, 2600);
+    const targetLinesText = chunkLines.map((line, index) => `[ID:${index + 1}] ${line}`).join('\n');
+    const prompt = `You are a professional multilingual song-lyric localizer. Translate the target lyrics into fluent, natural Turkish.
 Song: ${songTitle} — ${artist}
 
-Surrounding lyrics (context only; do not return translations for these lines):
+Nearby lyrics for context only:
 ${contextLinesText}
 
-Translate EXACTLY these ${chunkLines.length} numbered target lines, in the same order:
+Translate every target line below, preserving its ID and order:
 ${targetLinesText}
 
-CORE LOCALIZATION RULES
-- Translate meaning and intent, never word-by-word dictionary fragments. Produce fluent, natural Turkish that sounds like real lyrics.
-- Use informal second person (sen); never use formal "siz" unless the source clearly addresses a group.
-- Read the target lines together as one stanza. Use surrounding lines to resolve omitted subjects/objects, pronouns, tense, idioms and incomplete phrases.
-- A lyric line may continue into the next line. Keep its Turkish fragment natural; do not invent a sentence break or force a complete sentence where the source continues.
-- Preserve repetitions, echoes, parentheses, ad-libs and the emotional intensity of the original.
-- For mixed Korean/English lines, translate the Korean meaning while keeping English names, titles and deliberate hooks in English when they function as a name or refrain. Do not mechanically turn a repeated hook into an awkward Turkish verb.
-- Korean vocal interjections such as 오 / 아 / 와 may mean "Oh", "Ah" or "Vay" in a lyric. Do not automatically render 오 as the Turkish pronoun "o".
-- Translate idioms by their intended meaning. For example, 난 숨 못 참겠어 in a romantic/excited context means "Kendimi tutamıyorum", not "Nefesimi tutamıyorum".
-- Preserve metaphors, slang, humor, flirtation and explicit meaning. Do not sanitize, censor, soften, add details, reverse the meaning, or invent causes, actions or emotions.
-- Match the source's register: if the singer uses a crude sexual word or profanity, use a comparably direct, natural Turkish equivalent. Do not replace it with vague words such as "ora", "orası", "özel bölge", "şey", "kadın" or "bir şey".
-- In an explicitly sexual/vulgar context, "pussy" should remain an explicit Turkish term such as "am" or "amcık"; use "vajina" only for a neutral/clinical context. "Dick/cock" should remain "sik" in a crude lyric, not be softened to a vague euphemism.
-- Translate "fuck/fucking/fuckin'" by its role in the sentence: a sexual verb may require "sikişmek"; an intensifier may be "fena halde" or another natural intensifier. Never mechanically turn "fuckin'" into "lanet olasıcasına".
-- Translate "bitch/hoe/whore" as the insult/slang intended in context (for example "sürtük" or "orospu"), not as neutral "kadın". Translate "shit" with its intended force ("bok", "siktir", "lanet olsun", etc.), not a generic filler.
-- Keep English words that are clearly song titles, artist names or signature hooks unchanged. Translate ordinary English sentences normally.
-- Check every result against the source for subject, negation, tense, number, explicitness and emotional meaning before returning it.
+RULES
+- Translate meaning and intent, not isolated dictionary words. Read the lines as one connected stanza and use context to resolve pronouns, omitted subjects, tense, idioms and wordplay.
+- Keep Turkish conversational and natural. Preserve the speaker, addressee, negation, tense, number, emotional tone and metaphors.
+- Do not censor, sanitize or soften profanity, sexual language, insults or slang. Choose the actual Turkish equivalent that fits this exact context; never replace explicit words with vague euphemisms. In a crude sexual context, keep words such as "pussy" and "dick" equally explicit in Turkish; do not turn them into "ora" or "özel bölge". Do not mechanically translate "fuckin'" as "lanet olasıcasına"; determine whether it is an action, insult or intensifier.
+- For Korean/English mixed lines, translate all ordinary Korean and English meaning. Keep only genuine names, titles and intentional signature hooks in their original language. Repetition alone does not make a phrase a hook: translate ordinary phrases such as "Breathe in", "Breathe out" and "You and me now".
+- Do not leave ordinary source-language words untranslated. Translate "Talk to me" as "Benimle konuş", never as a device or object. Do not put romanization in the Turkish field.
+- Preserve repetitions, ad-libs, parentheses and unfinished line fragments. Do not invent actions, causes or emotions.
+- The "rom" field is only a readable Latin-script pronunciation of the original non-Latin text. It is not a translation. Use an empty string for Latin-script source lines.
+- Before returning, compare each Turkish line with its source for meaning, subject, negation and natural phrasing.
 
-Examples of natural localization:
-"Talk to me" -> "Benimle konuş" (never "Konuşma cihazı").
-"Tell me what's on your mind" -> "Aklından geçenleri söyle bana".
-"You say you want a good time" -> "Güzel vakit geçirmek istediğini söylüyorsun".
-"That's what I like" -> "Benim sevdiğim şey de bu".
-"pussy" in a crude sexual lyric -> "amcık" (not "ora").
-"fucked her right there on the table" -> "onu tam orada masanın üstünde siktim" (keep the explicit action).
-"always fuckin' miss you" -> "seni deli gibi özlüyorum" (treat "fuckin'" as an intensifier here, not a literal curse).
-
-For Hangul, Kanji, Hiragana, Katakana, Thai, Cyrillic and other non-Latin scripts, also provide readable, space-separated Latin romanization in "rom". For Latin-script lines, "rom" must be an empty string.
-Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"...","rom":"..."}, in the same order. No markdown, commentary or extra objects.`;
+Return only a JSON array with exactly ${chunkLines.length} objects. Each object must be {"id":1,"tr":"natural Turkish translation","rom":"romanization"} using the matching 1-based ID. Include one object per target line; never omit or reorder IDs. No markdown or commentary.`;
 
     let lastError = new Error('Gemini kombinasyonları şu an kullanılamıyor');
     const keyCount = geminiApiKeys.length;
@@ -1061,12 +1027,15 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       generationConfig: {
         // No temperature override: current Gemini 3.x guidance prefers model defaults.
         maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+        thinkingConfig: { thinkingLevel: 'low' },
         responseMimeType: 'application/json',
         ...(!simple ? { responseSchema: {
           type: 'ARRAY',
+          minItems: chunkLines.length,
+          maxItems: chunkLines.length,
           items: { type: 'OBJECT', properties: {
-            rom: { type: 'STRING' }, tr: { type: 'STRING' }
-          }, required: ['rom', 'tr'] }
+            id: { type: 'INTEGER' }, tr: { type: 'STRING' }, rom: { type: 'STRING' }
+          }, required: ['id', 'tr', 'rom'] }
         }} : {})
       }
     });
@@ -1103,8 +1072,8 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
               errJson = await response.json();
               bodyMsg = String(errJson?.error?.message || '').slice(0, 500);
             } catch (e) { /* keep HTTP status even if error body isn't JSON */ }
-            // If the schema/parameters are unsupported, retry ONCE without
-            // schema/thinking config. Do not waste all keys on the same 400.
+            // If the response schema is unsupported, retry ONCE without the schema.
+            // Do not waste all keys on the same 400.
             if (response.status === 400 && !simple && !usedSimpleRetry &&
                 /response.?schema|response.?format|generation.?config|unsupported.*schema/i.test(bodyMsg)) {
               simple = true;
@@ -1118,8 +1087,8 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
             const status = response.status;
             geminiLastError = `${model} (anahtar ${j + 1}): HTTP ${status} ${bodyMsg}`;
             if (status === 401 ||
-                /(?:standard.*api key|unrestricted.*standard|standard.*deprecated|auth key required|migrate.*auth key)/i.test(bodyMsg)) {
-              geminiLastError += ' — AI Studio > API Keys bölümünde anahtar türünü kontrol et; eski Standard anahtarlar için Gemini Auth key gerekebilir.';
+                /(?:standard.*api key|unrestricted.*standard|standard.*deprecated|auth key required|migrate.*auth key|authorization.*key)/i.test(bodyMsg)) {
+              geminiLastError += ' — Eylül 2026 sonrası Gemini API için AI Studio > API Keys bölümünden Auth API key kullan; eski Standard anahtarlar reddedilir.';
             }
             const now = Date.now();
             if (status === 429) {
@@ -1128,8 +1097,10 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
               const daily = /(?:per day|daily|requests per day|RPD|per_day)/i.test(bodyMsg);
               const wait = Math.min(daily ? Math.max(retryMs || 0, untilPacificDailyResetMs(now)) :
                 (retryMs || MODEL_DEAD_QUOTA_DEFAULT_MS), MODEL_DEAD_QUOTA_MAX_MS);
+              const groupId = quotaGroupId(apiKey);
+              projectCooldowns.set(groupId, now + Math.max(1000, wait));
               comboCooldowns.set(id, now + Math.max(1000, wait));
-              warn(`${model}: bu API anahtarı/model kombinasyonu 429 döndürdü; ${formatDuration(wait)} bekleyecek, diğer anahtarlar ayrı ayrı denenebilir.`);
+              warn(`${model}: bu Google Cloud proje kotası 429 döndürdü; ${formatDuration(wait)} bekleyecek. Aynı proje etiketindeki diğer anahtarlar da bekletilecek.`);
             } else if (status === 503 || status === 500 || status === 502 || status === 504) {
               // The *model service* is busy: switching API keys wastes quota.
               if (status === 503) stats.http503++;
@@ -1138,7 +1109,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
               modelCooldowns.set(model, now + MODEL_DEAD_LONG_MS);
             } else if (status === 401 || status === 402 ||
                 ((status === 400 || status === 403) &&
-                  /(?:api[_ -]?key[_ -]?invalid|invalid api key|api key not valid|permission.*api key|key was reported as invalid)/i.test(bodyMsg))) {
+                  /(?:api[_ -]?key[_ -]?invalid|invalid api key|api key not valid|permission.*api key|key was reported as invalid|standard.*api key|unrestricted.*standard|auth key required|migrate.*auth key)/i.test(bodyMsg))) {
               // A truly invalid key affects all models; a model-tier 403 does not.
               keyCooldowns.set(keyId(apiKey), now + MODEL_DEAD_LONG_MS);
             } else if (status === 403) {
@@ -1162,12 +1133,18 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
             .filter(p => !p?.thought && typeof p?.text === 'string')
             .map(p => p.text).join('');
           const parsed = parseGeminiJsonArray(rawOutput, chunkLines.length);
-          if (!parsed?.length) throw new Error(`Gemini JSON okunamadı (finishReason=${json?.candidates?.[0]?.finishReason || 'unknown'})`);
-          if (parsed.length < chunkLines.length) {
-            warn(`Gemini ${chunkLines.length} satırın ${parsed.length} tanesini döndürdü; eksikler yedek çeviriye bırakılıyor.`);
+          if (!parsed?.length) {
+            const parseError = new Error(`Gemini JSON okunamadı (finishReason=${json?.candidates?.[0]?.finishReason || 'unknown'})`);
+            parseError.code = 'GEMINI_INVALID_RESPONSE';
+            throw parseError;
+          }
+          if (parsed.some(item => !item)) {
+            const missingCount = parsed.filter(item => !item).length;
+            warn(`Gemini ${chunkLines.length} satırın ${missingCount} tanesini eksik döndürdü; yalnızca eksikler kısa gruplarla yeniden denenecek.`);
           }
           if (epoch !== generationId) throw new Error('İstek iptal edildi');
 
+          const acceptedGeminiLines = new Set();
           chunkLines.forEach((rawLine, i) => {
             const item = parsed[i] || {};
             const existing = cache.get(rawLine) || {};
@@ -1182,9 +1159,11 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
                 else needsRomajaRefetch.add(rawLine);
               } else cleanRom = fixGluedWords(romRaw);
             }
-            const usableTr = !!cleanTr && isUsableTranslation(rawLine, cleanTr);
+            const usableTr = !!cleanTr && isUsableTranslation(rawLine, cleanTr, songTitle, artist) &&
+              (!cleanRom || normalize(cleanTr) !== normalize(cleanRom));
+            if (usableTr) acceptedGeminiLines.add(rawLine);
             // Keep romanization even if Gemini omitted/failed the Turkish field.
-            // Ordinary missing lines may use GTX/MyMemory; contextual-risk lines stay Gemini-only when keys exist.
+            // Ordinary missing lines may use Google Translate; contextual-risk lines stay Gemini-only when keys exist.
             if (usableTr || cleanRom) {
               cache.set(rawLine, {
                 tr: usableTr ? cleanTr : (existing.tr || ''),
@@ -1204,15 +1183,21 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
           saveBackoffState();
           saveCache();
           updateDOMWithCache();
-          return chunkLines.filter(l => !cache.get(l)?.tr);
+          return chunkLines.filter(line => !acceptedGeminiLines.has(line));
         } catch (e) {
           if (epoch !== generationId) throw e;
           lastError = e;
           geminiLastError = `${model} (anahtar ${j + 1}): ${e?.name === 'AbortError' ? 'zaman aşımı' : (e?.message || e)}`;
+          if (e?.name === 'AbortError' || e?.code === 'GEMINI_INVALID_RESPONSE') {
+            // A timeout or malformed model response is not an API-key problem.
+            // Cool down the model and move to the next model instead of retrying
+            // the same slow model with every configured key.
+            modelCooldowns.set(model, Date.now() + (e?.name === 'AbortError' ? 45000 : 30000));
+            saveBackoffState();
+            break;
+          }
           if (isGeminiComboReady(apiKey, model)) {
-            // A timeout / malformed response is not solved by hammering the
-            // same model with four keys in the next seconds.
-            comboCooldowns.set(id, Date.now() + (e?.name === 'AbortError' ? 120000 : 60000));
+            comboCooldowns.set(id, Date.now() + 30000);
             saveBackoffState();
           }
         }
@@ -1248,12 +1233,9 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     };
   }
   const gtxGate = makeConcurrencyGate(2, 220);
-  const mmGate = makeConcurrencyGate(1, 300);
 
   const GTX_CHUNK_SIZE = 6;
   const GTX_CHUNK_PAUSE_MS = 200;
-  const MM_CHUNK_SIZE = 4;
-  const MM_CHUNK_PAUSE_MS = 350;
 
   function chunkArray(arr, size) {
     const out = [];
@@ -1318,7 +1300,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
             gtxGloballyDownUntil = 0;
             gtxBackoffStage = 0;
             cache.set(rawText, {
-              tr: existing.tr || (useTr ? fixedTr : (adlib ? rawText : '')),
+              tr: existing.tr || (useTr ? fixedTr : ''),
               romaja: cleanRomaja || existing.romaja || '',
               source: existing.tr ? (existing.source || 'gtx') :
                 (useTr ? 'gtx' : (existing.source || 'romanization')),
@@ -1397,110 +1379,26 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     }
   }
 
-  async function translateWithMyMemoryPerLine(linesToTranslate, epoch) {
-    if (epoch !== generationId || !isEnabled) return;
-    linesToTranslate = linesToTranslate.filter(line =>
-      !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
-    if (!linesToTranslate.length) return;
-    if (Date.now() < mmGloballyDownUntil) {
-      const remaining = Math.min(mmGloballyDownUntil - Date.now(), 60000);
-      linesToTranslate.forEach(t => markFailed(t, remaining));
-      return;
-    }
 
-    const chunks = chunkArray(linesToTranslate, MM_CHUNK_SIZE);
-
-    for (let ci = 0; ci < chunks.length; ci++) {
-      if (Date.now() < mmGloballyDownUntil) {
-        const remaining = Math.min(mmGloballyDownUntil - Date.now(), 60000);
-        chunks.slice(ci).flat().forEach(t => markFailed(t, remaining));
-        break;
-      }
-
-      await Promise.all(chunks[ci].map(async (rawText) => {
-        if (isAdlibPattern(rawText)) {
-          const existing = cache.get(rawText) || {};
-          if (!existing.tr) {
-            cache.set(rawText, { tr: rawText, romaja: existing.romaja || '',
-              source: 'mymemory', nextGeminiAt: Date.now() + FALLBACK_UPGRADE_INTERVAL_MS });
-          }
-          return;
-        }
-
-        if (!await mmGate.acquire(epoch)) return;
-        try {
-          if (disposed || epoch !== generationId || !isEnabled) return;
-          const q = String(rawText || '').slice(0, 480);
-          const srcLang = detectSourceLangForMyMemory(rawText);
-          const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${srcLang}|tr`;
-          const res = await fetchWithTimeout(url, {}, 10000);
-          if (!res.ok) {
-            mmLastError = `HTTP ${res.status}`;
-            throw new Error(mmLastError);
-          }
-          const json = await res.json();
-          if (disposed || epoch !== generationId || !isEnabled) return;
-
-          if (Number(json?.responseStatus) !== 200) {
-            mmLastError = json?.responseDetails || 'MyMemory kota/limit';
-            throw new Error(mmLastError);
-          }
-
-          const trLine = (json?.responseData?.translatedText || '').trim();
-          const fixedTr = fixGluedWords(forcePerfectTurkish(trLine));
-
-          // (V44) reject obviously glued MyMemory output instead of caching/showing it
-          if (isUsableTranslation(rawText, fixedTr)) {
-            mmConsecutiveFailures = 0;
-            mmGloballyDownUntil = 0;
-            mmBackoffStage = 0;
-            const existing = cache.get(rawText) || {};
-            cache.set(rawText, {
-              tr: existing.tr || fixedTr,
-              romaja: existing.romaja || '',
-              source: existing.tr ? (existing.source || 'mymemory') : 'mymemory',
-              nextGeminiAt: existing.tr ? (existing.nextGeminiAt || (Date.now() + FALLBACK_UPGRADE_INTERVAL_MS)) :
-                (geminiApiKeys.length ? Date.now() : (Date.now() + FALLBACK_UPGRADE_INTERVAL_MS))
-            });
-            updateDOMWithCache();
-          } else {
-            markFailed(rawText);
-          }
-        } catch (e) {
-          if (epoch !== generationId) return;
-          mmLastError = e?.name === 'AbortError' ? 'zaman aşımı (10sn)' : (mmLastError || e?.message || String(e));
-          mmConsecutiveFailures++;
-          if (mmConsecutiveFailures >= MM_FAIL_THRESHOLD && mmGloballyDownUntil <= Date.now()) {
-            const waitMs = MM_BACKOFF_STEPS_MS[Math.min(mmBackoffStage, MM_BACKOFF_STEPS_MS.length - 1)];
-            warn(`MyMemory tekrar tekrar başarısız oluyor (${mmLastError}) - ${Math.round(waitMs / 1000)}sn bekleniyor`);
-            mmGloballyDownUntil = Date.now() + waitMs;
-            mmBackoffStage++;
-            saveBackoffState();
-          }
-          markFailed(rawText);
-        } finally {
-          mmGate.release();
-        }
-      }));
-
-      saveCache();
-      updateDOMWithCache();
-
-      if (ci < chunks.length - 1) await sleep(MM_CHUNK_PAUSE_MS);
-    }
-  }
-
-  function prioritizeByActive(lines, allOrdered, activeText) {
-    if (!activeText) return lines;
+  function buildPriorityGroups(lines, allOrdered, activeText, groupSize) {
+    if (!activeText) return chunkArray(lines, groupSize);
     const activeIdx = allOrdered.indexOf(activeText);
-    if (activeIdx === -1) return lines;
-    const ahead = [];
-    const behind = [];
-    lines.forEach(l => {
-      const idx = allOrdered.indexOf(l);
-      if (idx === -1 || idx >= activeIdx) ahead.push(l); else behind.push(l);
-    });
-    return ahead.concat(behind);
+    if (activeIdx === -1) return chunkArray(lines, groupSize);
+
+    const positions = new Map(allOrdered.map((line, index) => [line, index]));
+    const upcoming = [];
+    const earlier = [];
+    for (const line of lines) {
+      const index = positions.get(line);
+      if (index === undefined || index >= activeIdx) upcoming.push(line);
+      else earlier.push(line);
+    }
+    upcoming.sort((a, b) => (positions.get(a) ?? Infinity) - (positions.get(b) ?? Infinity));
+    earlier.sort((a, b) => (positions.get(a) ?? Infinity) - (positions.get(b) ?? Infinity));
+
+    // Keep the end-of-song -> start-of-song wrap between groups. A batch must
+    // never combine lyrics from opposite ends of the track as one stanza.
+    return [...chunkArray(upcoming, groupSize), ...chunkArray(earlier, groupSize)];
   }
 
   async function processQueue(allVisibleLines, activeText) {
@@ -1513,14 +1411,16 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     );
     if (missing.length === 0) return;
     queueRunning = true;
-    missing = prioritizeByActive(missing, allVisibleLines, activeText);
     missing.forEach(t => inFlight.add(t));
 
     const finalizeGroup = (lines) => {
       const next = nextGeminiAvailableAt();
       for (const line of lines) {
         const item = cache.get(line);
-        if (item && ['gtx', 'mymemory', 'romanization', 'legacy'].includes(item.source)) {
+        if (item && (
+          ['gtx', 'mymemory', 'romanization', 'legacy'].includes(item.source) ||
+          (['gemini', 'glossary'].includes(item.source) && (item.promptVersion || 0) < TRANSLATION_PROMPT_VERSION)
+        )) {
           item.nextGeminiAt = Math.max(Date.now() + FALLBACK_UPGRADE_INTERVAL_MS, next || 0);
         }
         if (!item?.tr) markFailed(line, FAILURE_COOLDOWN_MS);
@@ -1529,23 +1429,35 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
 
     const startGemini = (lines) => {
       if (!geminiApiKeys.length || !lines.length || nextGeminiAvailableAt() > Date.now()) return null;
-      return translateChunkWithGemini(lines, allVisibleLines, epoch).catch(e => {
-        if (epoch === generationId) warn('Gemini geçici başarısızlık; Türkçe yedek çeviri korunuyor:', e?.message || e);
+      return (async () => {
+        try {
+          const missingFromResponse = await translateChunkWithGemini(lines, allVisibleLines, epoch);
+          // A valid but incomplete JSON response must not silently drop lines.
+          // Retry only missing rows once, in compact batches, never the whole batch.
+          if (missingFromResponse.length && epoch === generationId && isEnabled) {
+            for (const retryChunk of chunkArray(missingFromResponse, 8)) {
+              if (disposed || epoch !== generationId || !isEnabled) break;
+              if (nextGeminiAvailableAt() > Date.now()) break;
+              try {
+                await translateChunkWithGemini(retryChunk, allVisibleLines, epoch);
+              } catch (retryError) {
+                warn('Gemini eksik satırların kısa tekrarında başarısız:', retryError?.message || retryError);
+                break;
+              }
+            }
+          }
+        } catch (e) {
+          if (epoch === generationId) warn('Gemini geçici başarısızlık; Türkçe yedek çeviri korunuyor:', e?.message || e);
+        }
         return lines.filter(line => !cache.get(line)?.tr);
-      });
+      })();
     };
 
     try {
-      // Curated short expressions are instant and do not consume API requests.
-      for (const rawLine of missing) {
-        const safe = getSafeColloquialTranslation(rawLine);
-        if (safe && !cache.get(rawLine)?.tr) {
-          cache.set(rawLine, { ...cache.get(rawLine), tr: safe, source: 'glossary',
-            qualityVersion: CACHE_QUALITY_VERSION });
-        }
-      }
+      // Keep stale cached lines eligible for a lazy Gemini refresh; do not
+      // invalidate the entire local cache or create a burst of API requests.
       missing = missing.filter(l => !cache.get(l)?.tr || canUpgradeFallback(l));
-      const groups = chunkArray(missing, MAX_LINES_PER_GEMINI_CALL);
+      const groups = buildPriorityGroups(missing, allVisibleLines, activeText, MAX_LINES_PER_GEMINI_CALL);
 
       if (geminiApiKeys.length > 0 && qualityMode) {
         // Explicit strict mode: Gemini Turkish only; romanization remains independent.
@@ -1569,7 +1481,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
         }
       } else {
         // Start Gemini for the first group immediately, but never make Turkish
-        // subtitles wait for it. GTX/MyMemory fill all visible missing lines first.
+        // subtitles wait for it. Google Translate fills eligible missing lines first.
         const firstGroup = groups[0] || [];
         const firstGeminiPromise = startGemini(firstGroup);
         if (firstGeminiPromise) {
@@ -1582,14 +1494,6 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
           !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
         if (fallbackCandidates.length && Date.now() >= gtxGloballyDownUntil) {
           await translateWithGTXPerLine(fallbackCandidates, epoch);
-        }
-        if (disposed || epoch !== generationId || !isEnabled) return;
-
-        const stillMissing = missing.filter(line =>
-          !cache.get(line)?.tr &&
-          !(geminiApiKeys.length > 0 && requiresGeminiQuality(line)));
-        if (stillMissing.length && Date.now() >= mmGloballyDownUntil) {
-          await translateWithMyMemoryPerLine(stillMissing, epoch);
         }
         if (disposed || epoch !== generationId || !isEnabled) return;
 
@@ -1646,39 +1550,37 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     syncGeminiCooldown();
     const geminiDown = hasKeys && now < geminiGloballyDownUntil;
     const gtxDown = now < gtxGloballyDownUntil;
-    const mmDown = now < mmGloballyDownUntil;
-    const allDown = (!hasKeys || geminiDown) && gtxDown && mmDown;
-    const anyWarn = geminiDown || (!hasKeys || !qualityMode) && (gtxDown || mmDown);
+    const allDown = (!hasKeys || geminiDown) && gtxDown;
+    const anyWarn = geminiDown || (!hasKeys || !qualityMode) && gtxDown;
 
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && anyWarn ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
     if (!isEnabled) {
-      btn.title = 'SpicyTR V55.1 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
+      btn.title = 'SpicyTR V56.0.0 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
       return;
     }
 
     if (allDown) {
-      const waitSec = Math.max(0, Math.round((Math.max(geminiGloballyDownUntil, gtxGloballyDownUntil, mmGloballyDownUntil) - now) / 1000));
+      const waitSec = Math.max(0, Math.round((Math.max(geminiGloballyDownUntil, gtxGloballyDownUntil) - now) / 1000));
       const reasons = [
         hasKeys && geminiLastError ? `Gemini: ${geminiLastError}` : null,
-        gtxLastError ? `Translate: ${gtxLastError}` : null,
-        mmLastError ? `MyMemory: ${mmLastError}` : null
+        gtxLastError ? `Translate: ${gtxLastError}` : null
       ].filter(Boolean).join(' | ');
       btn.title = `Tüm çeviri motorları şu anda kullanılamıyor - ${reasons || 'sebep henüz kaydedilmedi'} - yaklaşık ${waitSec}sn sonra otomatik tekrar denenecek`;
-    } else if (geminiDown && (gtxDown || mmDown)) {
+    } else if (geminiDown && gtxDown) {
       btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'geçici'}), kalan yedek motorla devam ediliyor`;
     } else if (geminiDown) {
       btn.title = `Gemini şu an kullanılamıyor (${geminiLastError || 'geçici'}) - otomatik bekleme etkin`;
-    } else if (gtxDown || mmDown) {
-      const which = gtxDown ? 'Google Translate' : 'MyMemory';
-      const reason = gtxDown ? gtxLastError : mmLastError;
+    } else if (gtxDown) {
+      const which = 'Google Translate';
+      const reason = gtxLastError;
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V55.1 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
+        ? `SpicyTR V56.0.0 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
-    btn.title = `[SpicyTR V55.1${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
+    btn.title = `[SpicyTR V56.0.0${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
   }
 
   // The Spicy Lyrics controls are React-managed. A button-local onclick is
@@ -1686,12 +1588,12 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
   // click. Use one delegated, capture-phase handler for our owned button.
   // It survives React replacing the toolbar and blocks ancestor click handlers.
   let ownedToggleButton = null;
-  const TOGGLE_OWNER = 'spicytr-55-1';
+  const TOGGLE_OWNER = 'spicytr-56-0';
   function handleToggleClick(event) {
     if (disposed || !ownedToggleButton) return;
     const target = event.target;
     // An obsolete V47/V49 button may have appeared during an old observer
-    // callback. Route those clicks into V55.1 state rather than old onclick.
+    // callback. Route those clicks into V56.0 state rather than old onclick.
     const clickedButton = target instanceof Element && target.closest('#spicy-tr-toggle-btn');
     if (!clickedButton || !clickedButton.closest('#SpicyLyricsPage .ViewControls')) return;
     event.preventDefault();
@@ -1766,10 +1668,26 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       abortOngoingWork();
       queueRunning = false;
       clearTimeout(batchTimer); batchTimer = null;
-      geminiApiKeys = Array.from(new Set(
-        rawInput.split(/[,\n]+/).map(k => k.trim()).filter(k => k.length > 10)
-      ));
+      const parsedEntries = rawInput.split(/[,\n]+/).map(entry => {
+        const value = entry.trim();
+        if (!value) return null;
+        const match = /^([A-Za-z0-9_.-]{1,40})\s*=\s*(.+)$/.exec(value);
+        return match
+          ? { key: match[2].trim(), group: match[1].trim() }
+          : { key: value, group: '' };
+      }).filter(entry => entry && entry.key.length > 10);
+
+      geminiApiKeys = Array.from(new Set(parsedEntries.map(entry => entry.key)));
+      geminiKeyGroups = new Map();
+      for (const entry of parsedEntries) {
+        if (entry.group) geminiKeyGroups.set(entry.key, entry.group);
+      }
+      saveKeyGroups();
       try { localStorage.setItem(GEMINI_KEYS_STORAGE, JSON.stringify(geminiApiKeys)); } catch (e2) {}
+      const activeGroups = new Set(geminiApiKeys.map(quotaGroupId));
+      for (const group of Array.from(projectCooldowns.keys())) {
+        if (!activeGroups.has(group)) projectCooldowns.delete(group);
+      }
       failedUntil.clear();
       inFlight.clear();
       needsRomajaRefetch.clear();
@@ -1803,7 +1721,8 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
         // Extremely old/unsupported Spicetify build without PopupModal -
         // last-resort fallback (may not show anything, but at least we tried).
         try {
-          const fallbackInput = prompt('Gemini API anahtarlarınızı girin (virgülle ayırın):', geminiApiKeys.join(', '));
+          const fallbackInput = prompt('Gemini Auth API anahtarlarını girin (aynı proje için aynı etiket: projeA=AIza...):',
+            geminiApiKeys.map(key => geminiKeyGroups.has(key) ? `${geminiKeyGroups.get(key)}=${key}` : key).join(', '));
           if (fallbackInput !== null) applySettings(fallbackInput);
         } catch (eFallback) {
           err('PopupModal yok ve prompt() de çalışmadı, anahtar girişi yapılamıyor:', eFallback);
@@ -1818,14 +1737,17 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       wrap.style.minWidth = '360px';
 
       const label = document.createElement('div');
-      label.textContent = 'Gemini API anahtarlarını virgül veya yeni satırla ayırın. Google kotaları anahtar başına değil proje başınadır; aynı projeye bağlı anahtarlar kotayı paylaşır.';
+      label.textContent = 'Gemini Auth API anahtarlarını virgül veya yeni satırla girin. Aynı Google Cloud projesindeki anahtarları aynı etiketle yazın (ör. projeA=AIza...). Farklı projeler için farklı etiket kullanın. Etiketsiz anahtarlar ayrı proje varsayılır. Eylül 2026 itibarıyla eski Standard anahtarlar reddedilir; AI Studio’dan Auth anahtarı kullanın.';
       label.style.fontSize = '13px';
       label.style.lineHeight = '1.4';
       wrap.appendChild(label);
 
       const textarea = document.createElement('textarea');
-      textarea.value = geminiApiKeys.join(', ');
-      textarea.placeholder = 'AIzaSy... , AIzaSy... , ...';
+      textarea.value = geminiApiKeys.map(key => {
+        const group = geminiKeyGroups.get(key);
+        return group ? `${group}=${key}` : key;
+      }).join('\n');
+      textarea.placeholder = 'projeA=AIzaSy...\nprojeB=AIzaSy...';
       textarea.style.width = '100%';
       textarea.style.minHeight = '70px';
       textarea.style.boxSizing = 'border-box';
@@ -1848,7 +1770,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       qualityInput.checked = qualityMode;
       qualityLabel.appendChild(qualityInput);
       const qualityText = document.createElement('span');
-      qualityText.textContent = 'Yalnızca Gemini çevirisini göster: Açılırsa Gemini yanıt veremediğinde Google Translate/MyMemory yedeği gizlenir. Önerilen: Kapalı (Türkçe satırlar boş kalmasın).';
+      qualityText.textContent = 'Yalnızca Gemini çevirisini göster: Açılırsa Gemini yanıt veremediğinde Google Translate yedeği gizlenir. Önerilen: Açık (daha doğru çeviri için; Gemini geçici olarak yanıt vermezse satır boş kalabilir).';
       qualityLabel.appendChild(qualityText);
       wrap.appendChild(qualityLabel);
 

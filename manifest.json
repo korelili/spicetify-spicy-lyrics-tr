@@ -1,7 +1,7 @@
 [
   {
     "name": "Spicy Lyrics AI Translator & Romaja",
-    "version": "55.1.0",
+    "version": "56.0.0",
     "readme": "README.md",
     "description": "Context-aware Turkish lyric translations that preserve slang and explicit meaning, with romanization and optional Gemini AI.",
     "preview": "marketplace-icon.png",
