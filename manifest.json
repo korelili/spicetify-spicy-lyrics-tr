@@ -1,9 +1,9 @@
 [
   {
     "name": "Spicy Lyrics AI Translator & Romaja",
-    "version": "53.0.0",
+    "version": "54.0.0",
     "readme": "README.md",
-    "description": "Natural Turkish lyric translations and romanized pronunciation for Spicy Lyrics, with optional Gemini AI.",
+    "description": "Fast Turkish lyric translations with independent romanization, responsive Gemini AI upgrades, and immediate fallback translations.",
     "preview": "marketplace-icon.png",
     "main": "spicy-tr.js",
     "authors": [
