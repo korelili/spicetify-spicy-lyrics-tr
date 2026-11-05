@@ -1,16 +1,16 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 54.0.0
-// V54: restore responsive translation flow, immediate Turkish fallback, partial-batch recovery;
+// VERSION: 55.0.0
+// V55: romanize Korean songwriter names in Spicy Lyrics credits without Gemini/API usage;
 // Preserve V52 runtime toggle, API keys, cache identity, and contextual Gemini localization.
 // Preserves saved API keys, translation cache key and existing Spicy Lyrics UI.
 // Note: Google Gemini quotas are per project, not per API key.
 
-(function spicyTurkishProV54() {
+(function spicyTurkishProV55() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V54]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V54]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V54]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V55]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V55]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V55]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -157,7 +157,7 @@
     lastTrackSwitchAt = Date.now();
     stats.trackSwitches++;
   }
-  window.__spicyTRDiagnostics = () => ({ version: '54.0.0', enabled: isEnabled, ...stats,
+  window.__spicyTRDiagnostics = () => ({ version: '55.0.0', enabled: isEnabled, ...stats,
     currentSong: currentSongId, cacheLines: cache.size,
     inFlightLines: inFlight.size, queueRunning,
     availableModels: GEMINI_MODELS.filter(m => geminiApiKeys.some(k => isGeminiComboReady(k, m))),
@@ -515,6 +515,19 @@
       -webkit-text-fill-color: #ffffff !important;
       opacity: 1 !important;
     }
+    html:not(.spicy-tr-off) #SpicyLyricsPage .spicy-tr-credit-romaja {
+      font-size: 0.88em !important;
+      font-weight: 500 !important;
+      color: rgba(255, 255, 255, 0.72) !important;
+      -webkit-text-fill-color: rgba(255, 255, 255, 0.72) !important;
+      opacity: 1 !important;
+      white-space: normal !important;
+      margin-left: 0.18em !important;
+    }
+    html.spicy-tr-off #SpicyLyricsPage .spicy-tr-credit-romaja,
+    body.spicy-tr-off #SpicyLyricsPage .spicy-tr-credit-romaja {
+      display: none !important;
+    }
     html:not(.spicy-tr-off) #SpicyLyricsPage .line.NotSung, html:not(.spicy-tr-off) #SpicyLyricsPage .line.Sung { opacity: 0.78 !important; }
     html:not(.spicy-tr-off) #SpicyLyricsPage .line.Active { opacity: 1 !important; }
     #spicy-tr-toggle-btn {
@@ -553,7 +566,10 @@
     document.body.classList.toggle('spicy-tr-off', !isEnabled);
   }
   function clearRenderedSubtitles() {
-    document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box').forEach(el => el.remove());
+    document.querySelectorAll('#SpicyLyricsPage .spicy-tr-box, #SpicyLyricsPage .spicy-tr-credit-romaja').forEach(el => el.remove());
+    document.querySelectorAll('#SpicyLyricsPage [data-spicy-tr-credit-source]').forEach(el => {
+      delete el.dataset.spicyTrCreditSource;
+    });
   }
   applyEnabledClass();
   if (!isEnabled) clearRenderedSubtitles();
@@ -636,6 +652,98 @@ function isNonLatin(text) {
     const repeated = splitRepeatingUnit(s);
     if (repeated) return repeated;
     return s.replace(/([a-zçğıöşü0-9])([A-ZÇĞİÖŞÜ])/g, '$1 $2');
+  }
+
+  // Spicy Lyrics shows songwriter metadata as a "Written by ..." line.
+  // Romanize Hangul locally so credits never consume Gemini quota or delay lyrics.
+  const HANGUL_INITIALS = ['g', 'kk', 'n', 'd', 'tt', 'r', 'm', 'b', 'pp', 's', 'ss', '', 'j', 'jj', 'ch', 'k', 't', 'p', 'h'];
+  const HANGUL_VOWELS = ['a', 'ae', 'ya', 'yae', 'eo', 'e', 'yeo', 'ye', 'o', 'wa', 'wae', 'oe', 'yo', 'u', 'wo', 'we', 'wi', 'yu', 'eu', 'ui', 'i'];
+  const HANGUL_FINALS = ['', 'k', 'k', 'ks', 'n', 'nj', 'nh', 't', 'l', 'lk', 'lm', 'lb', 'ls', 'lt', 'lp', 'lh', 'm', 'p', 'ps', 't', 't', 'ng', 't', 't', 'k', 't', 'p', 't'];
+
+  function romanizeHangulText(value) {
+    return Array.from(String(value || '')).map(char => {
+      const code = char.codePointAt(0);
+      if (code < 0xAC00 || code > 0xD7A3) return char;
+      const syllable = code - 0xAC00;
+      const initial = Math.floor(syllable / 588);
+      const vowel = Math.floor((syllable % 588) / 28);
+      const final = syllable % 28;
+      return HANGUL_INITIALS[initial] + HANGUL_VOWELS[vowel] + HANGUL_FINALS[final];
+    }).join('');
+  }
+
+  function capitalizeCreditRomanization(value) {
+    return String(value || '').replace(/(^|[\s-])([a-z])/g, (_, prefix, letter) => prefix + letter.toUpperCase());
+  }
+
+  function romanizeCreditNames(value) {
+    return String(value || '').split(/[,;&/·•]|\band\b/i)
+      .map(name => name.trim())
+      .filter(name => /[\uAC00-\uD7A3]/.test(name))
+      .map(name => capitalizeCreditRomanization(romanizeHangulText(name)))
+      .filter(Boolean);
+  }
+
+  function processSongwriterCredits() {
+    const page = document.querySelector('#SpicyLyricsPage');
+    if (!page) return;
+
+    // Don't depend on a Spicy Lyrics internal class name: find the smallest
+    // element whose complete text is the songwriter credit line.
+    const elements = [page, ...page.querySelectorAll('*')];
+    elements.forEach(el => {
+      if (el.closest?.('.spicy-tr-box')) return;
+
+      let sourceText = el.textContent || '';
+      el.querySelectorAll('.spicy-tr-credit-romaja').forEach(node => {
+        sourceText = sourceText.replace(node.textContent || '', '');
+      });
+      const raw = sourceText.replace(/\s+/g, ' ').trim();
+      const existing = Array.from(el.children || []).find(child => child.className === 'spicy-tr-credit-romaja') || null;
+      if (!raw || raw.length > 180) {
+        existing?.remove();
+        delete el.dataset.spicyTrCreditSource;
+        return;
+      }
+
+      const writtenBy = raw.match(/^written\s+by\s*:?\s*(.+)$/i);
+      if (!writtenBy) {
+        existing?.remove();
+        delete el.dataset.spicyTrCreditSource;
+        return;
+      }
+
+      // A wrapper can contain the same line as a nested child. Process only
+      // the innermost matching element to avoid duplicate annotations.
+      const hasMatchingChild = Array.from(el.children || []).some(child => {
+        let childText = child.textContent || '';
+        child.querySelectorAll('.spicy-tr-credit-romaja').forEach(node => {
+          childText = childText.replace(node.textContent || '', '');
+        });
+        return /^written\s+by\s*:?\s*.+$/i.test(childText.replace(/\s+/g, ' ').trim());
+      });
+      if (hasMatchingChild) {
+        existing?.remove();
+        delete el.dataset.spicyTrCreditSource;
+        return;
+      }
+
+      if (el.dataset.spicyTrCreditSource === raw && existing) return;
+      existing?.remove();
+      delete el.dataset.spicyTrCreditSource;
+
+      // Some layouts put provider attribution in the same text container.
+      const namesText = writtenBy[1].split(/\bprovided\s+by\b/i)[0].trim();
+      const romanizedNames = romanizeCreditNames(namesText);
+      el.dataset.spicyTrCreditSource = raw;
+      if (!romanizedNames.length) return;
+
+      const span = document.createElement('span');
+      span.className = 'spicy-tr-credit-romaja';
+      span.textContent = ` (${romanizedNames.join(', ')})`;
+      span.title = 'Korece isimlerin yaklaşık Latin harfli okunuşu';
+      el.appendChild(span);
+    });
   }
 
   function getCleanText(lineEl) {
@@ -1484,7 +1592,7 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && anyWarn ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : allDown ? '!!' : (hasKeys ? (anyWarn ? 'AI!' : 'AI') : (anyWarn ? 'TR!' : 'TR'));
     if (!isEnabled) {
-      btn.title = 'SpicyTR V54 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
+      btn.title = 'SpicyTR V55 · KAPALI — Açmak için sol tıkla. Ayarlar için sağ tıkla.';
       return;
     }
 
@@ -1506,10 +1614,10 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
       btn.title = `${which} şu anda geçici olarak kullanılamıyor (${reason || 'rate-limit'}) - diğer motorlar devrede`;
     } else {
       btn.title = hasKeys
-        ? `SpicyTR V54 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
+        ? `SpicyTR V55 (${geminiApiKeys.length} Gemini anahtarı tanımlı - sağ tık: ayarlar)`
         : 'Sağ tık: Gemini API anahtarı/anahtarları gir (isteğe bağlı, daha iyi çeviri için)';
     }
-    btn.title = `[SpicyTR V54${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
+    btn.title = `[SpicyTR V55${qualityMode && hasKeys ? ' · kalite modu açık' : ''}] ${btn.title} | Gemini istek: ${stats.geminiCalls}, başarılı: ${stats.geminiSuccess}, 429: ${stats.http429}, 503: ${stats.http503}. Konsol: __spicyTRDiagnostics()`;
   }
 
   // The Spicy Lyrics controls are React-managed. A button-local onclick is
@@ -1517,12 +1625,12 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
   // click. Use one delegated, capture-phase handler for our owned button.
   // It survives React replacing the toolbar and blocks ancestor click handlers.
   let ownedToggleButton = null;
-  const TOGGLE_OWNER = 'spicytr-54';
+  const TOGGLE_OWNER = 'spicytr-55';
   function handleToggleClick(event) {
     if (disposed || !ownedToggleButton) return;
     const target = event.target;
     // An obsolete V47/V49 button may have appeared during an old observer
-    // callback. Route those clicks into V54 state rather than old onclick.
+    // callback. Route those clicks into V55 state rather than old onclick.
     const clickedButton = target instanceof Element && target.closest('#spicy-tr-toggle-btn');
     if (!clickedButton || !clickedButton.closest('#SpicyLyricsPage .ViewControls')) return;
     event.preventDefault();
@@ -1748,9 +1856,10 @@ Return only a JSON array of EXACTLY ${chunkLines.length} objects, each {"tr":"..
     injectToggleButton();
     if (!isEnabled) {
       // Clean up overlay remnants on remounted lyric views.
-      if (document.querySelector('#SpicyLyricsPage .spicy-tr-box')) clearRenderedSubtitles();
+      if (document.querySelector('#SpicyLyricsPage .spicy-tr-box, #SpicyLyricsPage .spicy-tr-credit-romaja')) clearRenderedSubtitles();
       return;
     }
+    processSongwriterCredits();
     const id = trackIdentity();
     if (id && currentSongId && id !== currentSongId) invalidateTrackWork();
     if (id) currentSongId = id;
