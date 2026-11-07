@@ -1,15 +1,15 @@
 // NAME: Spicy Lyrics AI Translator & Romaja
 // AUTHOR: korelili
-// VERSION: 58.0.0
-// V58.0.0: Gemini-only lyric translation, shorter batches, clean retry state and persistent AI cache.
+// VERSION: 58.0.1
+// V58.0.1: Bugfix - 'Önbelleği sıfırla' artık takılı kalmış Gemini kota/model bekleme durumunu da temizliyor (önceki sürümde temizlemiyordu, bu yüzden tek bir 429/5xx sonrası çeviri kalıcı olarak durabiliyordu).
 // Preserves saved Gemini API keys, the toggle button and the existing Spicy Lyrics UI.
 // Turkish lyric translation is performed only by Gemini AI.
 
 (function spicyTurkishProV58() {
   const DEBUG = localStorage.getItem('spicy_tr_debug') === 'true'; // Enable in DevTools for diagnosis
-  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V58.0.0]', 'color:#1db954;font-weight:bold', ...args); };
-  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V58.0.0]', 'color:#ffae00;font-weight:bold', ...args); };
-  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V58.0.0]', 'color:#ff4b4b;font-weight:bold', ...args); };
+  const log = (...args) => { if (DEBUG) console.log('%c[SpicyTR V58.0.1]', 'color:#1db954;font-weight:bold', ...args); };
+  const warn = (...args) => { if (DEBUG) console.warn('%c[SpicyTR V58.0.1]', 'color:#ffae00;font-weight:bold', ...args); };
+  const err = (...args) => { if (DEBUG) console.error('%c[SpicyTR V58.0.1]', 'color:#ff4b4b;font-weight:bold', ...args); };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let generationId = 0;
   let disposed = false;
@@ -171,6 +171,23 @@
     lastCacheClearAt = Date.now();
     currentSongId = trackIdentity() || currentSongId;
     clearRenderedSubtitles();
+    // BUG FIX (V58.0.1): "Önbelleği sıfırla" only cleared cached lines; it
+    // never cleared deadModels/modelCooldowns/comboCooldowns/keyCooldowns/
+    // projectCooldowns. A single 429/403/5xx run could leave every model
+    // and key globally cooled down for up to 24 saat, and that state is
+    // persisted to localStorage (BACKOFF_STATE_KEY) across reloads - so the
+    // extension silently sent zero requests afterward, with no way for the
+    // user to recover from the UI. A cache reset must also clear this.
+    deadModels.clear();
+    modelCooldowns.clear();
+    comboCooldowns.clear();
+    keyCooldowns.clear();
+    projectCooldowns.clear();
+    geminiKeyCursor = 0;
+    geminiGloballyDownUntil = 0;
+    geminiLastError = '';
+    geminiLastModel = '';
+    saveBackoffState();
     return { cacheLines: cache.size, removedStorageKeys: lastCacheClearRemoved };
   }
 
@@ -188,7 +205,7 @@
     stats.trackSwitches++;
   }
   window.__spicyTRDiagnostics = () => ({
-    version: '58.0.0',
+    version: '58.0.1',
     engine: 'Gemini only',
     enabled: isEnabled,
     keyCount: geminiApiKeys.length,
@@ -1322,17 +1339,17 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
     btn.className = `${isEnabled ? 'active' : ''} ${hasKeys ? 'ai-mode' : ''} ${isEnabled && geminiDown ? 'quota-warn' : ''}`.trim();
     btn.textContent = !isEnabled ? 'OFF' : !hasKeys ? 'KEY' : (geminiDown ? 'AI!' : 'AI');
     if (!isEnabled) {
-      btn.title = 'SpicyTR V58.0.0 · KAPALI — Açmak için sol tıkla. Gemini ayarları için sağ tıkla.';
+      btn.title = 'SpicyTR V58.0.1 · KAPALI — Açmak için sol tıkla. Gemini ayarları için sağ tıkla.';
       return;
     }
 
     if (!hasKeys) {
-      btn.title = 'SpicyTR V58.0.0 — Gemini API anahtarı eklemek için sağ tıkla.';
+      btn.title = 'SpicyTR V58.0.1 — Gemini API anahtarı eklemek için sağ tıkla.';
     } else if (geminiDown) {
       const waitSec = Math.max(0, Math.ceil((geminiGloballyDownUntil - now) / 1000));
-      btn.title = `SpicyTR V58.0.0 — Gemini geçici olarak beklemede (${waitSec} sn). Son hata: ${geminiLastError || 'geçici servis/kota beklemesi'}`;
+      btn.title = `SpicyTR V58.0.1 — Gemini geçici olarak beklemede (${waitSec} sn). Son hata: ${geminiLastError || 'geçici servis/kota beklemesi'}`;
     } else {
-      btn.title = `SpicyTR V58.0.0 — Gemini AI çevirisi açık (${geminiApiKeys.length} anahtar).`;
+      btn.title = `SpicyTR V58.0.1 — Gemini AI çevirisi açık (${geminiApiKeys.length} anahtar).`;
     }
     btn.title += ` İstek: ${stats.geminiCalls}, başarılı grup: ${stats.geminiSuccess}, çevrilen satır: ${stats.geminiTranslatedLines}. Son hata: ${geminiLastError || 'yok'}. Konsol: __spicyTRDiagnostics()`;
   }
@@ -1550,7 +1567,7 @@ Return only a JSON array with exactly ${chunkLines.length} objects. Each object 
         Spicetify.PopupModal.hide();
       };
       const resetBtn = mkBtn('Önbelleği sıfırla', false);
-      resetBtn.title = 'Tüm eski ve yeni çeviri kayıtlarını siler; Gemini API anahtarlarını korur.';
+      resetBtn.title = 'Tüm eski ve yeni çeviri kayıtlarını VE Gemini kota/bekleme durumunu siler; Gemini API anahtarlarını korur.';
       resetBtn.onclick = () => {
         applySettings(textarea.value, true);
         Spicetify.PopupModal.hide();
